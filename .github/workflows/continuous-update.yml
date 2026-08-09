@@ -16,6 +16,10 @@ jobs:
 
       - uses: microsoft/setup-msbuild@v2
 
+      - uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgJsonGlob: 'vcpkg.json'
+
       - name: Build x64 release
         shell: pwsh
         run: |
@@ -27,6 +31,7 @@ jobs:
           $stage = Join-Path $env:RUNNER_TEMP 'FVG-GribMonitor'
           New-Item -ItemType Directory -Path $stage | Out-Null
           Copy-Item 'x64\Release\FvgGribMonitor.exe' $stage
+          Copy-Item "$env:VCPKG_ROOT\installed\x64-windows\bin\*.dll" $stage
           Copy-Item 'Update-FvgGribMonitor.ps1' $stage
           Copy-Item 'Download-LatestFvgGrib.ps1' $stage
           Compress-Archive -Path $stage -DestinationPath 'FVG-GribMonitor.zip'

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <eccodes.h>
+#include <cstdio>
 #include <fstream>
 #include <iomanip>
 #include <iterator>
@@ -104,6 +106,59 @@ namespace
             values.push_back((referenceValue + packed * binaryMultiplier) * decimalMultiplier);
         }
         return values;
+    }
+
+    void PopulateWithEcCodes(const std::filesystem::path& path, std::vector<GribField>& fields)
+    {
+        FILE* file = nullptr;
+        if (_wfopen_s(&file, path.c_str(), L"rb") != 0)
+            throw std::runtime_error("Impossibile aprire il file GRIB con ecCodes.");
+
+        std::size_t index = 0;
+        int error = 0;
+        while (codes_handle* handle = codes_handle_new_from_file(nullptr, file, PRODUCT_GRIB, &error))
+        {
+            if (index >= fields.size())
+            {
+                codes_handle_delete(handle);
+                break;
+            }
+
+            auto& field = fields[index++];
+            long value = 0;
+            auto getLong = [&](const char* key, long& output) { return codes_get_long(handle, key, &output) == CODES_SUCCESS; };
+            auto getDouble = [&](const char* key, double& output) { return codes_get_double(handle, key, &output) == CODES_SUCCESS; };
+
+            if (getLong("Ni", value)) field.columns = static_cast<std::uint32_t>(value);
+            if (getLong("Nj", value)) field.rows = static_cast<std::uint32_t>(value);
+            if (getLong("numberOfDataPoints", value)) field.pointCount = static_cast<std::uint32_t>(value);
+            if (getLong("packingType", value)) field.packingTemplate = static_cast<int>(value);
+            getDouble("latitudeOfFirstGridPointInDegrees", field.firstLatitude);
+            getDouble("longitudeOfFirstGridPointInDegrees", field.firstLongitude);
+            getDouble("latitudeOfLastGridPointInDegrees", field.lastLatitude);
+            getDouble("longitudeOfLastGridPointInDegrees", field.lastLongitude);
+            getDouble("iDirectionIncrementInDegrees", field.longitudeIncrement);
+            getDouble("jDirectionIncrementInDegrees", field.latitudeIncrement);
+
+            std::size_t count = 0;
+            if (codes_get_size(handle, "values", &count) == CODES_SUCCESS && count > 0)
+            {
+                field.values.resize(count);
+                if (codes_get_double_array(handle, "values", field.values.data(), &count) == CODES_SUCCESS)
+                {
+                    const auto [minimum, maximum] = std::minmax_element(field.values.begin(), field.values.end());
+                    field.minimumValue = *minimum;
+                    field.maximumValue = *maximum;
+                }
+                else
+                    field.values.clear();
+            }
+            codes_handle_delete(handle);
+        }
+        fclose(file);
+
+        if (index != fields.size())
+            throw std::runtime_error("ecCodes non ha letto tutti i messaggi GRIB.");
     }
 }
 
@@ -230,6 +285,7 @@ std::vector<GribField> GribReader::ReadInventory(const std::filesystem::path& pa
 
     if (fields.empty())
         throw std::runtime_error("Nessun messaggio GRIB2 valido trovato.");
+    PopulateWithEcCodes(path, fields);
     return fields;
 }
 
