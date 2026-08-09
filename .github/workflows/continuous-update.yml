@@ -28,6 +28,7 @@ jobs:
           New-Item -ItemType Directory -Path $stage | Out-Null
           Copy-Item 'x64\Release\FvgGribMonitor.exe' $stage
           Copy-Item 'Update-FvgGribMonitor.ps1' $stage
+          Copy-Item 'Download-LatestFvgGrib.ps1' $stage
           Compress-Archive -Path $stage -DestinationPath 'FVG-GribMonitor.zip'
 
       - name: Publish continuous release

@@ -22,11 +22,13 @@ namespace
     constexpr int IdMap = 1003;
     constexpr int IdUpdate = 1004;
     constexpr int IdAbout = 1005;
+    constexpr int IdDownload = 1006;
 
     HINSTANCE instance{};
     HWND openButton{};
     HWND updateButton{};
     HWND aboutButton{};
+    HWND downloadButton{};
     HWND fieldsList{};
     HWND detailsLabel{};
     HWND severityLabel{};
@@ -333,6 +335,20 @@ namespace
         ShellExecuteW(nullptr, L"open", L"https://github.com/gmy77/GribViewer/releases/tag/continuous", nullptr, nullptr, SW_SHOWNORMAL);
     }
 
+    void DownloadLatestGrib(HWND parent)
+    {
+        wchar_t executablePath[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, executablePath, MAX_PATH);
+        const auto script = std::filesystem::path(executablePath).parent_path() / L"Download-LatestFvgGrib.ps1";
+        if (!std::filesystem::exists(script))
+        {
+            MessageBoxW(parent, L"Lo script di download non e disponibile accanto all'eseguibile.", L"FVG GRIB Monitor", MB_OK | MB_ICONWARNING);
+            return;
+        }
+        const auto arguments = std::format(L"-ExecutionPolicy Bypass -File \"{}\"", script.wstring());
+        ShellExecuteW(parent, L"open", L"powershell.exe", arguments.c_str(), script.parent_path().c_str(), SW_SHOWNORMAL);
+    }
+
     void ShowAbout(HWND parent)
     {
         MessageBoxW(parent,
@@ -373,6 +389,7 @@ namespace
 
             titleLabel = CreateWindowW(L"STATIC", L"FVG GRIB MONITOR", WS_CHILD | WS_VISIBLE, 16, 20, 270, 32, window, nullptr, instance, nullptr);
             openButton = CreateWindowW(L"BUTTON", L"\u25A3  Apri GRIB", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 17, 140, 36, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdOpen)), instance, nullptr);
+            downloadButton = CreateWindowW(L"BUTTON", L"\u21E9  Scarica GRIB", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 17, 155, 36, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdDownload)), instance, nullptr);
             updateButton = CreateWindowW(L"BUTTON", L"\u21BB  Aggiorna", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 17, 120, 36, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdUpdate)), instance, nullptr);
             aboutButton = CreateWindowW(L"BUTTON", L"\u24D8  About", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 17, 100, 36, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdAbout)), instance, nullptr);
             fieldsHeading = CreateWindowW(L"STATIC", L"CAMPI METEOROLOGICI", WS_CHILD | WS_VISIBLE, 16, 86, 300, 22, window, nullptr, instance, nullptr);
@@ -384,7 +401,7 @@ namespace
             CreateWindowW(L"FvgMap", nullptr, WS_CHILD | WS_VISIBLE | WS_BORDER, 410, 112, 660, 440, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdMap)), instance, nullptr);
 
             SetControlFont(titleLabel, titleFont);
-            for (const HWND control : { openButton, updateButton, aboutButton, fieldsHeading, fieldsList, detailsHeading, detailsLabel, severityLabel, mapHeading })
+            for (const HWND control : { openButton, downloadButton, updateButton, aboutButton, fieldsHeading, fieldsList, detailsHeading, detailsLabel, severityLabel, mapHeading })
                 SetControlFont(control, uiFont);
             return 0;
         case WM_SIZE:
@@ -393,7 +410,8 @@ namespace
             GetClientRect(window, &client);
             const int panelWidth = (std::max)(390, static_cast<int>(client.right) / 3);
             const int right = static_cast<int>(client.right) - 16;
-            MoveWindow(openButton, right - 380, 17, 140, 36, TRUE);
+            MoveWindow(openButton, right - 545, 17, 140, 36, TRUE);
+            MoveWindow(downloadButton, right - 395, 17, 155, 36, TRUE);
             MoveWindow(updateButton, right - 230, 17, 120, 36, TRUE);
             MoveWindow(aboutButton, right - 100, 17, 100, 36, TRUE);
             MoveWindow(fieldsHeading, 16, 86, panelWidth - 32, 22, TRUE);
@@ -438,6 +456,8 @@ namespace
         case WM_COMMAND:
             if (LOWORD(wParam) == IdOpen)
                 ChooseAndLoadFile(window);
+            else if (LOWORD(wParam) == IdDownload)
+                DownloadLatestGrib(window);
             else if (LOWORD(wParam) == IdUpdate)
                 OpenUpdateChannel();
             else if (LOWORD(wParam) == IdAbout)

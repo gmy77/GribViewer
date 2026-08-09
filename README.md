@@ -13,7 +13,7 @@ Applicazione desktop Win32/C++20 per l'inventario di file GRIB2 e la visualizzaz
 - calcola un indice da 1 a 10 da valori CAPE reali quando il campo selezionato e CAPE.
 - include un canale di aggiornamento GitHub automatico e consensuale.
 
-La dashboard usa il materiale Mica di Windows 11 e offre i comandi con icone vettoriali **Apri GRIB**, **Aggiorna** (apre il canale GitHub pubblicato) e **About**.
+La dashboard usa il materiale Mica di Windows 11 e offre i comandi con icone vettoriali **Apri GRIB**, **Scarica GRIB**, **Aggiorna** (apre il canale GitHub pubblicato) e **About**. Il download interroga NOAA NOMADS per l'ultimo ciclo GFS disponibile, estraendo CAPE e componenti U/V del vento per FVG (12--14 E, 45--47 N).
 
 Il file di esempio `FVG_CAPE_20260809.grib2` contiene cinque messaggi GRIB2; l'applicazione li inventaria senza dipendenze esterne.
 
