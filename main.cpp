@@ -153,14 +153,14 @@ namespace
             LoadFile(parent, path);
     }
 
-    LRESULT CALLBACK MapProc(HWND window, UINT message, WPARAM, LPARAM)
+    LRESULT CALLBACK MapProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
     {
         if (message == WM_PAINT)
         {
             PaintMap(window);
             return 0;
         }
-        return DefWindowProcW(window, message, 0, 0);
+        return DefWindowProcW(window, message, wParam, lParam);
     }
 
     LRESULT CALLBACK MainProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
@@ -169,7 +169,7 @@ namespace
         {
         case WM_CREATE:
             CreateWindowW(L"BUTTON", L"Apri GRIB...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 14, 14, 130, 34, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdOpen)), instance, nullptr);
-            CreateWindowW(L"STATIC", L"Inventario e opzioni di visualizzazione", WS_CHILD | WS_VISIBLE | SS_LEFT, 160, 20, 230, 24, window, nullptr, instance, nullptr);
+            CreateWindowW(L"STATIC", L"Campi GRIB2", WS_CHILD | WS_VISIBLE | SS_LEFT, 160, 20, 230, 24, window, nullptr, instance, nullptr);
             fieldsList = CreateWindowW(L"LISTBOX", nullptr, WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY | WS_VSCROLL, 14, 58, 380, 260, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdFields)), instance, nullptr);
             detailsLabel = CreateWindowW(L"STATIC", L"Seleziona un file GRIB2.", WS_CHILD | WS_VISIBLE | SS_LEFT, 14, 330, 380, 150, window, nullptr, instance, nullptr);
             severityLabel = CreateWindowW(L"STATIC", L"Indice: n/d", WS_CHILD | WS_VISIBLE | SS_LEFT, 14, 490, 380, 32, window, nullptr, instance, nullptr);
