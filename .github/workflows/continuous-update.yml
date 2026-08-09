@@ -20,6 +20,11 @@ jobs:
         with:
           vcpkgJsonGlob: 'vcpkg.json'
 
+      - name: Install ecCodes
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_ROOT\vcpkg.exe" install --triplet x64-windows --x-manifest-root .
+
       - name: Build x64 release
         shell: pwsh
         run: |
