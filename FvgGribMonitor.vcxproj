@@ -37,5 +37,10 @@
   </ItemDefinitionGroup>
   <ItemGroup><ClInclude Include="GribReader.h" /></ItemGroup>
   <ItemGroup><ClCompile Include="GribReader.cpp" /><ClCompile Include="main.cpp" /></ItemGroup>
+  <ItemGroup>
+    <None Include="FvgBoundary.geojson">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

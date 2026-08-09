@@ -36,6 +36,7 @@ class GribReader
 {
 public:
     std::vector<GribField> ReadInventory(const std::filesystem::path& path) const;
+    GribField DecodeField(const std::filesystem::path& path, std::size_t messageIndex, GribField field) const;
 
 private:
     static std::uint32_t ReadU32(const std::vector<std::uint8_t>& bytes, std::size_t offset);

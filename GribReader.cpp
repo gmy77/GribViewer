@@ -108,7 +108,7 @@ namespace
         return values;
     }
 
-    void PopulateWithEcCodes(const std::filesystem::path& path, std::vector<GribField>& fields)
+    GribField DecodeWithEcCodes(const std::filesystem::path& path, std::size_t messageIndex, GribField field)
     {
         FILE* file = nullptr;
         if (_wfopen_s(&file, path.c_str(), L"rb") != 0)
@@ -118,13 +118,12 @@ namespace
         int error = 0;
         while (codes_handle* handle = codes_handle_new_from_file(nullptr, file, PRODUCT_GRIB, &error))
         {
-            if (index >= fields.size())
+            if (index++ != messageIndex)
             {
                 codes_handle_delete(handle);
-                break;
+                continue;
             }
 
-            auto& field = fields[index++];
             long value = 0;
             auto getLong = [&](const char* key, long& output) { return codes_get_long(handle, key, &output) == CODES_SUCCESS; };
             auto getDouble = [&](const char* key, double& output) { return codes_get_double(handle, key, &output) == CODES_SUCCESS; };
@@ -132,7 +131,6 @@ namespace
             if (getLong("Ni", value)) field.columns = static_cast<std::uint32_t>(value);
             if (getLong("Nj", value)) field.rows = static_cast<std::uint32_t>(value);
             if (getLong("numberOfDataPoints", value)) field.pointCount = static_cast<std::uint32_t>(value);
-            if (getLong("packingType", value)) field.packingTemplate = static_cast<int>(value);
             getDouble("latitudeOfFirstGridPointInDegrees", field.firstLatitude);
             getDouble("longitudeOfFirstGridPointInDegrees", field.firstLongitude);
             getDouble("latitudeOfLastGridPointInDegrees", field.lastLatitude);
@@ -154,11 +152,12 @@ namespace
                     field.values.clear();
             }
             codes_handle_delete(handle);
+            fclose(file);
+            return field;
         }
         fclose(file);
 
-        if (index != fields.size())
-            throw std::runtime_error("ecCodes non ha letto tutti i messaggi GRIB.");
+        throw std::runtime_error("ecCodes non ha trovato il messaggio GRIB selezionato.");
     }
 }
 
@@ -262,16 +261,6 @@ std::vector<GribField> GribReader::ReadInventory(const std::filesystem::path& pa
             case 6:
                 bitmapPresent = sectionLength > 5 && bytes[section + 5] != 255;
                 break;
-            case 7:
-                if (field.packingTemplate == 0 && !bitmapPresent)
-                {
-                    field.values = DecodeSimplePacking(bytes, section, sectionLength, packedValueCount,
-                        referenceValue, binaryScale, decimalScale, bitsPerValue);
-                    const auto [minimum, maximum] = std::minmax_element(field.values.begin(), field.values.end());
-                    field.minimumValue = *minimum;
-                    field.maximumValue = *maximum;
-                }
-                break;
             default:
                 break;
             }
@@ -285,8 +274,12 @@ std::vector<GribField> GribReader::ReadInventory(const std::filesystem::path& pa
 
     if (fields.empty())
         throw std::runtime_error("Nessun messaggio GRIB2 valido trovato.");
-    PopulateWithEcCodes(path, fields);
     return fields;
+}
+
+GribField GribReader::DecodeField(const std::filesystem::path& path, std::size_t messageIndex, GribField field) const
+{
+    return DecodeWithEcCodes(path, messageIndex, std::move(field));
 }
 
 std::uint32_t GribReader::ReadU32(const std::vector<std::uint8_t>& bytes, std::size_t offset)

@@ -7,10 +7,17 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <format>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #pragma comment(lib, "dwmapi.lib")
@@ -23,6 +30,8 @@ namespace
     constexpr int IdUpdate = 1004;
     constexpr int IdAbout = 1005;
     constexpr int IdDownload = 1006;
+    constexpr UINT MessageInventoryReady = WM_APP + 1;
+    constexpr UINT MessageFieldReady = WM_APP + 2;
 
     HINSTANCE instance{};
     HWND openButton{};
@@ -43,6 +52,113 @@ namespace
     HFONT uiFont{};
     std::vector<GribField> fields;
     std::wstring openedPath;
+    std::thread loader;
+    std::atomic_bool loading{};
+
+    struct GeoPoint { double longitude; double latitude; };
+    std::vector<std::vector<GeoPoint>> fvgRings;
+
+    struct InventoryResult
+    {
+        std::filesystem::path path;
+        std::vector<GribField> inventory;
+        std::string error;
+    };
+
+    struct FieldResult
+    {
+        std::size_t index{};
+        GribField field;
+        std::string error;
+    };
+
+    void SkipSpace(const char*& cursor)
+    {
+        while (*cursor && std::isspace(static_cast<unsigned char>(*cursor)))
+            ++cursor;
+    }
+
+    void ParseGeoJsonCoordinates(const char*& cursor, int depth, std::vector<std::vector<GeoPoint>>& rings)
+    {
+        SkipSpace(cursor);
+        if (*cursor++ != '[')
+            throw std::runtime_error("Coordinate GeoJSON non valide.");
+        if (depth > 2)
+        {
+            do
+            {
+                ParseGeoJsonCoordinates(cursor, depth - 1, rings);
+                SkipSpace(cursor);
+            } while (*cursor++ == ',');
+            return;
+        }
+
+        std::vector<GeoPoint> ring;
+        do
+        {
+            SkipSpace(cursor);
+            if (*cursor++ != '[')
+                throw std::runtime_error("Coordinate GeoJSON non valide.");
+            char* end = nullptr;
+            const double longitude = std::strtod(cursor, &end);
+            cursor = end;
+            SkipSpace(cursor);
+            if (*cursor++ != ',')
+                throw std::runtime_error("Coordinate GeoJSON non valide.");
+            const double latitude = std::strtod(cursor, &end);
+            cursor = end;
+            SkipSpace(cursor);
+            while (*cursor && *cursor != ']' && *cursor != ',')
+                ++cursor; // Ignore the optional altitude coordinate.
+            if (*cursor++ != ']')
+                throw std::runtime_error("Coordinate GeoJSON non valide.");
+            ring.push_back({ longitude, latitude });
+            SkipSpace(cursor);
+            if (*cursor == ']')
+                break;
+            ++cursor;
+        } while (*cursor);
+        if (*cursor == ']')
+            ++cursor;
+        if (ring.size() >= 3)
+            rings.push_back(std::move(ring));
+    }
+
+    void LoadFvgBoundary()
+    {
+        wchar_t executable[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, executable, MAX_PATH);
+        const auto asset = std::filesystem::path(executable).parent_path() / L"FvgBoundary.geojson";
+        std::ifstream input(asset, std::ios::binary);
+        if (!input)
+            throw std::runtime_error("Asset del confine FVG non trovato.");
+        const std::string json{ std::istreambuf_iterator<char>(input), {} };
+        const auto key = json.find("\"coordinates\"");
+        if (key == std::string::npos)
+            throw std::runtime_error("Asset del confine FVG non valido.");
+        const char* cursor = json.c_str() + json.find('[', key);
+        ParseGeoJsonCoordinates(cursor, 4, fvgRings);
+        if (fvgRings.empty())
+            throw std::runtime_error("Asset del confine FVG privo di geometrie.");
+    }
+
+    bool IsInFvg(double longitude, double latitude)
+    {
+        bool inside = false;
+        for (const auto& ring : fvgRings)
+        {
+            for (std::size_t current = 0, previous = ring.size() - 1; current < ring.size(); previous = current++)
+            {
+                const auto& a = ring[current];
+                const auto& b = ring[previous];
+                if ((a.latitude > latitude) != (b.latitude > latitude)
+                    && longitude < (b.longitude - a.longitude) * (latitude - a.latitude)
+                        / (b.latitude - a.latitude) + a.longitude)
+                    inside = !inside;
+            }
+        }
+        return inside;
+    }
 
     int SeverityFor(const GribField& field)
     {
@@ -146,62 +262,80 @@ namespace
         const int width = rect.right - rect.left;
         const int height = rect.bottom - rect.top;
         const auto field = SelectedField();
-        if (field && !field->values.empty() && field->columns > 0 && field->rows > 0)
+        if (field && !field->values.empty() && field->columns > 1 && field->rows > 1)
         {
-            const auto latitudeStep = field->latitudeIncrement > 0 ? field->latitudeIncrement
-                : std::abs(field->lastLatitude - field->firstLatitude) / (field->rows - 1);
-            const auto longitudeStep = field->longitudeIncrement > 0 ? field->longitudeIncrement
-                : std::abs(field->lastLongitude - field->firstLongitude) / (field->columns - 1);
-            constexpr double MinLatitude = 45.4;
-            constexpr double MaxLatitude = 47.1;
-            constexpr double MinLongitude = 12.0;
-            constexpr double MaxLongitude = 14.1;
             const int mapLeft = 32;
             const int mapTop = 28;
-            const int mapWidth = width - 64;
-            const int mapHeight = height - 84;
-            const auto projectX = [&](double longitude) { return mapLeft + static_cast<int>((longitude - MinLongitude) / (MaxLongitude - MinLongitude) * mapWidth); };
-            const auto projectY = [&](double latitude) { return mapTop + static_cast<int>((MaxLatitude - latitude) / (MaxLatitude - MinLatitude) * mapHeight); };
+            const int mapWidth = (std::max)(1, width - 64);
+            const int mapHeight = (std::max)(1, height - 84);
+            constexpr double minLatitude = 45.55;
+            constexpr double maxLatitude = 46.68;
+            constexpr double minLongitude = 12.28;
+            constexpr double maxLongitude = 13.95;
+            constexpr double latitudeCentre = (minLatitude + maxLatitude) / 2;
+            const auto longitudeScale = std::cos(latitudeCentre * 3.14159265358979323846 / 180.0);
+            const auto geographicalWidth = (maxLongitude - minLongitude) * longitudeScale;
+            const auto geographicalHeight = maxLatitude - minLatitude;
+            const auto scale = (std::min)(mapWidth / geographicalWidth, mapHeight / geographicalHeight);
+            const auto drawnWidth = static_cast<int>(geographicalWidth * scale);
+            const auto drawnHeight = static_cast<int>(geographicalHeight * scale);
+            const auto drawLeft = mapLeft + (mapWidth - drawnWidth) / 2;
+            const auto drawTop = mapTop + (mapHeight - drawnHeight) / 2;
+            const auto projectX = [&](double longitude) { return drawLeft + static_cast<int>((longitude - minLongitude) * longitudeScale * scale); };
+            const auto projectY = [&](double latitude) { return drawTop + static_cast<int>((maxLatitude - latitude) * scale); };
 
-            constexpr std::uint32_t SmoothingScale = 6;
-            const auto latitudeDirection = field->lastLatitude >= field->firstLatitude ? 1.0 : -1.0;
-            const auto longitudeDirection = field->lastLongitude >= field->firstLongitude ? 1.0 : -1.0;
-            for (std::uint32_t row = 0; row < field->rows * SmoothingScale; ++row)
+            const auto rowStep = (field->lastLatitude - field->firstLatitude) / (field->rows - 1);
+            const auto columnStep = (field->lastLongitude - field->firstLongitude) / (field->columns - 1);
+            if (rowStep == 0 || columnStep == 0 || field->values.size() < static_cast<std::size_t>(field->rows) * field->columns)
             {
-                const auto sourceRow = (static_cast<double>(row) + 0.5) / SmoothingScale - 0.5;
-                const auto latitude = field->firstLatitude + latitudeDirection * sourceRow * latitudeStep;
-                if (latitude < MinLatitude - latitudeStep || latitude > MaxLatitude + latitudeStep)
+                DrawTextAt(dc, width * 18 / 100, height * 44 / 100, L"La griglia del campo non ha coordinate regolari utilizzabili.", RGB(24, 51, 77), 17, true);
+                EndPaint(window, &paint);
+                return;
+            }
+
+            std::vector<DWORD> raster(static_cast<std::size_t>(drawnWidth) * drawnHeight, RGB(235, 246, 250));
+            for (int y = 0; y < drawnHeight; ++y)
+            {
+                const auto latitude = maxLatitude - (static_cast<double>(y) + 0.5) / scale;
+                const auto sourceRow = (latitude - field->firstLatitude) / rowStep;
+                if (sourceRow < 0 || sourceRow > field->rows - 1)
                     continue;
-                for (std::uint32_t column = 0; column < field->columns * SmoothingScale; ++column)
+                for (int x = 0; x < drawnWidth; ++x)
                 {
-                    const auto sourceColumn = (static_cast<double>(column) + 0.5) / SmoothingScale - 0.5;
-                    const auto longitude = field->firstLongitude + longitudeDirection * sourceColumn * longitudeStep;
-                    if (longitude < MinLongitude - longitudeStep || longitude > MaxLongitude + longitudeStep)
+                    const auto longitude = minLongitude + (static_cast<double>(x) + 0.5) / (longitudeScale * scale);
+                    if (!IsInFvg(longitude, latitude))
                         continue;
-                    RECT cell{
-                        projectX(longitude - longitudeStep / (2 * SmoothingScale)), projectY(latitude + latitudeStep / (2 * SmoothingScale)),
-                        projectX(longitude + longitudeStep / (2 * SmoothingScale)), projectY(latitude - latitudeStep / (2 * SmoothingScale))
-                    };
+                    const auto sourceColumn = (longitude - field->firstLongitude) / columnStep;
+                    if (sourceColumn < 0 || sourceColumn > field->columns - 1)
+                        continue;
                     const auto value = BilinearSample(*field, sourceColumn, sourceRow);
-                    HBRUSH cellBrush = CreateSolidBrush(GridColor(value, field->minimumValue, field->maximumValue));
-                    FillRect(dc, &cell, cellBrush);
-                    DeleteObject(cellBrush);
+                    const auto color = GridColor(value, field->minimumValue, field->maximumValue);
+                    raster[static_cast<std::size_t>(y) * drawnWidth + x] = static_cast<DWORD>(GetBValue(color))
+                        | (static_cast<DWORD>(GetGValue(color)) << 8) | (static_cast<DWORD>(GetRValue(color)) << 16);
                 }
             }
 
-            const struct { double longitude; double latitude; } outline[] = {
-                { 12.28, 46.27 }, { 12.51, 46.66 }, { 13.02, 46.82 }, { 13.64, 46.80 },
-                { 13.92, 46.61 }, { 13.82, 46.17 }, { 13.78, 45.62 }, { 13.20, 45.58 },
-                { 12.60, 45.74 }, { 12.28, 46.03 }
-            };
-            std::vector<POINT> border;
-            border.reserve(std::size(outline));
-            for (const auto& point : outline)
-                border.push_back({ projectX(point.longitude), projectY(point.latitude) });
+            BITMAPINFO bitmap{};
+            bitmap.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            bitmap.bmiHeader.biWidth = drawnWidth;
+            bitmap.bmiHeader.biHeight = -drawnHeight;
+            bitmap.bmiHeader.biPlanes = 1;
+            bitmap.bmiHeader.biBitCount = 32;
+            bitmap.bmiHeader.biCompression = BI_RGB;
+            StretchDIBits(dc, drawLeft, drawTop, drawnWidth, drawnHeight, 0, 0, drawnWidth, drawnHeight,
+                raster.data(), &bitmap, DIB_RGB_COLORS, SRCCOPY);
+
             HPEN borderPen = CreatePen(PS_SOLID, 3, RGB(20, 48, 69));
             const auto oldPen = SelectObject(dc, borderPen);
             const auto oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
-            Polygon(dc, border.data(), static_cast<int>(border.size()));
+            for (const auto& ring : fvgRings)
+            {
+                std::vector<POINT> border;
+                border.reserve(ring.size());
+                for (const auto& point : ring)
+                    border.push_back({ projectX(point.longitude), projectY(point.latitude) });
+                Polygon(dc, border.data(), static_cast<int>(border.size()));
+            }
             SelectObject(dc, oldPen);
             SelectObject(dc, oldBrush);
             DeleteObject(borderPen);
@@ -231,8 +365,10 @@ namespace
                             if (magnitude == 0 || maximumMagnitude == 0)
                                 continue;
 
-                            const auto latitude = field->firstLatitude + latitudeDirection * row * latitudeStep;
-                            const auto longitude = field->firstLongitude + longitudeDirection * column * longitudeStep;
+                            const auto latitude = field->firstLatitude + row * rowStep;
+                            const auto longitude = field->firstLongitude + column * columnStep;
+                            if (!IsInFvg(longitude, latitude))
+                                continue;
                             const auto x = projectX(longitude);
                             const auto y = projectY(latitude);
                             const auto angle = std::atan2(-meridionalValue, zonalValue);
@@ -277,6 +413,8 @@ namespace
         EndPaint(window, &paint);
     }
 
+    void StartFieldLoad(HWND parent, std::size_t index);
+
     void UpdateSelection(HWND parent)
     {
         const auto index = static_cast<int>(SendMessageW(fieldsList, LB_GETCURSEL, 0, 0));
@@ -285,39 +423,62 @@ namespace
 
         const auto& field = fields[index];
         const int score = SeverityFor(field);
+        const std::wstring valueRange = field.values.empty() ? L"caricamento..." : std::format(L"{:.1f} - {:.1f}", field.minimumValue, field.maximumValue);
         const auto detail = std::format(
-            L"Parametro: {}\r\nRiferimento: {}   Previsione: {}\r\nGriglia: {} x {} | valori: {:.1f} - {:.1f}\r\nCoordinate: ({:.2f}, {:.2f}) - ({:.2f}, {:.2f})",
+            L"Parametro: {}\r\nRiferimento: {}   Previsione: {}\r\nGriglia: {} x {} | valori: {}\r\nCoordinate: ({:.2f}, {:.2f}) - ({:.2f}, {:.2f})",
             field.parameterName, field.referenceTime, field.forecastTime,
-            field.columns, field.rows, field.minimumValue, field.maximumValue,
+            field.columns, field.rows, valueRange,
             field.firstLatitude, field.firstLongitude, field.lastLatitude, field.lastLongitude);
-        const auto severity = std::format(L"Fenomeni intensi: {}/10", score);
+        const auto severity = field.values.empty() ? L"Decodifica del campo in background..." : std::format(L"Fenomeni intensi: {}/10", score);
         SetWindowTextW(detailsLabel, detail.c_str());
         SetWindowTextW(severityLabel, severity.c_str());
         InvalidateRect(GetDlgItem(parent, IdMap), nullptr, TRUE);
+        StartFieldLoad(parent, static_cast<std::size_t>(index));
     }
 
-    bool LoadFile(HWND parent, const std::filesystem::path& path)
+    void StartFieldLoad(HWND parent, std::size_t index)
     {
-        try
+        if (loading || index >= fields.size() || !fields[index].values.empty())
+            return;
+        if (loader.joinable())
+            loader.join();
+        loading = true;
+        const auto path = std::filesystem::path(openedPath);
+        const auto inventoryField = fields[index];
+        loader = std::thread([parent, path, inventoryField, index]
         {
-            fields = GribReader{}.ReadInventory(path);
-            openedPath = path.wstring();
-            SendMessageW(fieldsList, LB_RESETCONTENT, 0, 0);
-            for (const auto& field : fields)
+            auto result = std::make_unique<FieldResult>();
+            result->index = index;
+            try
             {
-                const auto name = std::format(L"{}  |  {}  |  {}", field.parameterName, field.referenceTime, field.forecastTime);
-                SendMessageW(fieldsList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name.c_str()));
+                result->field = GribReader{}.DecodeField(path, index, inventoryField);
             }
-            SendMessageW(fieldsList, LB_SETCURSEL, 0, 0);
-            UpdateSelection(parent);
-            SetWindowTextW(parent, std::format(L"FVG GRIB Monitor - {}", path.filename().wstring()).c_str());
-            return true;
-        }
-        catch (const std::exception& error)
+            catch (const std::exception& error) { result->error = error.what(); }
+            PostMessageW(parent, MessageFieldReady, 0, reinterpret_cast<LPARAM>(result.release()));
+        });
+    }
+
+    void StartInventoryLoad(HWND parent, const std::filesystem::path& path)
+    {
+        if (loading)
+            return;
+        if (loader.joinable())
+            loader.join();
+        loading = true;
+        EnableWindow(openButton, FALSE);
+        EnableWindow(downloadButton, FALSE);
+        SetWindowTextW(detailsLabel, L"Lettura dell'inventario GRIB in background...");
+        loader = std::thread([parent, path]
         {
-            MessageBoxA(parent, error.what(), "FVG GRIB Monitor", MB_OK | MB_ICONERROR);
-            return false;
-        }
+            auto result = std::make_unique<InventoryResult>();
+            result->path = path;
+            try
+            {
+                result->inventory = GribReader{}.ReadInventory(path);
+            }
+            catch (const std::exception& error) { result->error = error.what(); }
+            PostMessageW(parent, MessageInventoryReady, 0, reinterpret_cast<LPARAM>(result.release()));
+        });
     }
 
     void ChooseAndLoadFile(HWND parent)
@@ -331,7 +492,7 @@ namespace
         dialog.lpstrFilter = L"File GRIB (*.grib;*.grib2)\0*.grib;*.grib2\0Tutti i file\0*.*\0";
         dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
         if (GetOpenFileNameW(&dialog))
-            LoadFile(parent, path);
+            StartInventoryLoad(parent, path);
     }
 
     void OpenUpdateChannel()
@@ -469,7 +630,51 @@ namespace
             else if (LOWORD(wParam) == IdFields && HIWORD(wParam) == LBN_SELCHANGE)
                 UpdateSelection(window);
             return 0;
+        case MessageInventoryReady:
+        {
+            const std::unique_ptr<InventoryResult> result(reinterpret_cast<InventoryResult*>(lParam));
+            if (loader.joinable())
+                loader.join();
+            loading = false;
+            EnableWindow(openButton, TRUE);
+            EnableWindow(downloadButton, TRUE);
+            if (!result->error.empty())
+            {
+                MessageBoxA(window, result->error.c_str(), "FVG GRIB Monitor", MB_OK | MB_ICONERROR);
+                return 0;
+            }
+            fields = std::move(result->inventory);
+            openedPath = result->path.wstring();
+            SendMessageW(fieldsList, LB_RESETCONTENT, 0, 0);
+            for (const auto& field : fields)
+            {
+                const auto name = std::format(L"{}  |  {}  |  {}", field.parameterName, field.referenceTime, field.forecastTime);
+                SendMessageW(fieldsList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name.c_str()));
+            }
+            SendMessageW(fieldsList, LB_SETCURSEL, 0, 0);
+            UpdateSelection(window);
+            SetWindowTextW(window, std::format(L"FVG GRIB Monitor - {}", result->path.filename().wstring()).c_str());
+            return 0;
+        }
+        case MessageFieldReady:
+        {
+            const std::unique_ptr<FieldResult> result(reinterpret_cast<FieldResult*>(lParam));
+            if (loader.joinable())
+                loader.join();
+            loading = false;
+            if (!result->error.empty())
+            {
+                MessageBoxA(window, result->error.c_str(), "FVG GRIB Monitor", MB_OK | MB_ICONERROR);
+                return 0;
+            }
+            if (result->index < fields.size())
+                fields[result->index] = std::move(result->field);
+            UpdateSelection(window);
+            return 0;
+        }
         case WM_DESTROY:
+            if (loader.joinable())
+                loader.join();
             DeleteObject(headerBrush);
             DeleteObject(bodyBrush);
             DeleteObject(infoBrush);
@@ -486,6 +691,15 @@ namespace
 int WINAPI wWinMain(HINSTANCE application, HINSTANCE, PWSTR, int commandShow)
 {
     instance = application;
+    try
+    {
+        LoadFvgBoundary();
+    }
+    catch (const std::exception& error)
+    {
+        MessageBoxA(nullptr, error.what(), "FVG GRIB Monitor", MB_OK | MB_ICONERROR);
+        return 1;
+    }
     WNDCLASSW mapClass{ .lpfnWndProc = MapProc, .hInstance = instance, .hCursor = LoadCursor(nullptr, IDC_ARROW), .lpszClassName = L"FvgMap" };
     RegisterClassW(&mapClass);
     WNDCLASSW mainClass{ .lpfnWndProc = MainProc, .hInstance = instance, .hCursor = LoadCursor(nullptr, IDC_ARROW), .lpszClassName = L"FvgGribMonitor" };
@@ -503,7 +717,7 @@ int WINAPI wWinMain(HINSTANCE application, HINSTANCE, PWSTR, int commandShow)
     if (arguments)
     {
         if (argumentCount == 2)
-            LoadFile(window, arguments[1]);
+            StartInventoryLoad(window, arguments[1]);
         LocalFree(arguments);
     }
 

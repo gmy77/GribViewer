@@ -5,3 +5,6 @@ Release/
 *.user
 *.VC.db
 *.VC.opendb
+*.dll
+*.exe
+vcpkg_installed/

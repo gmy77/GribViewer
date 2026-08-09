@@ -7,15 +7,17 @@ Applicazione desktop Win32/C++20 per l'inventario di file GRIB2 e la visualizzaz
 - individua ogni messaggio GRIB2 nel file, con offset e dimensione;
 - mostra disciplina, categoria e numero del parametro, template di griglia/prodotto, data di riferimento, lead time e dimensione della griglia;
 - riconosce CAPE, CIN, precipitazione, temperatura e componenti del vento;
-- decodifica il template GRIB2 5.0 (simple packing) e disegna ogni cella della griglia nel suo punto geografico;
-- interpola visivamente i valori tra celle adiacenti e traccia vettori del vento quando sono presenti entrambe le componenti zonale e meridionale;
-- sovrappone il contorno FVG e Udine, Trieste, Pordenone e Gorizia al raster;
+- usa ecCodes per decodificare il solo campo selezionato (simple packing, JPEG2000, PNG, CCSDS, bitmap e altre codifiche supportate) senza bloccare l'interfaccia;
+- crea un raster bilineare alla risoluzione della mappa: anche un GFS globale viene campionato direttamente sull'area FVG, anziché disegnare milioni di celle fuori regione;
+- ritaglia il raster al vero confine regionale e sovrappone Udine, Trieste, Pordenone e Gorizia con coordinate geografiche reali;
 - calcola un indice da 1 a 10 da valori CAPE reali quando il campo selezionato e CAPE.
 - include un canale di aggiornamento GitHub automatico e consensuale.
 
 La dashboard usa il materiale Mica di Windows 11 e offre i comandi con icone vettoriali **Apri GRIB**, **Scarica GRIB**, **Aggiorna** (apre il canale GitHub pubblicato) e **About**. Il download interroga NOAA NOMADS per l'ultimo ciclo GFS disponibile, estraendo CAPE e componenti U/V del vento per FVG (12--14 E, 45--47 N).
 
-Il file di esempio `FVG_CAPE_20260809.grib2` contiene cinque messaggi GRIB2; l'applicazione li inventaria senza dipendenze esterne.
+### Confine regionale
+
+`FvgBoundary.geojson` contiene esclusivamente la geometria del Friuli Venezia Giulia (codice ISTAT 06), in EPSG:4326. È derivato dai confini amministrativi ISTAT al 1 gennaio 2019 pubblicati dal progetto [teamdigitale/confini-amministrativi-istat](https://github.com/teamdigitale/confini-amministrativi-istat/tree/develop/20190101), sorgente ISTAT con licenza CC-BY 4.0. La geometria è stata riproiettata da ETRS89 / UTM 32N e semplificata a 0,0012° per un asset distribuito compatto; i metadati e l'attribuzione restano nell'asset.
 
 ## Aprire e compilare
 
@@ -39,14 +41,12 @@ Per rieseguire la stessa release:
 .\Update-FvgGribMonitor.ps1 -Force
 ```
 
-## Decodifica completa dei valori
+## Dipendenza ecCodes
 
-L'inventario nativo legge in sicurezza la struttura standard GRIB2. I valori delle celle possono essere compressi con template diversi: per supportare *tutti* i template operativi (simple packing, JPEG2000, PNG, CCSDS, bitmap e griglie non regolari), la prossima integrazione deve usare **ecCodes** di ECMWF.
+L'inventario nativo legge la struttura standard GRIB2 in un thread di lavoro. ecCodes decodifica poi il campo richiesto, mantenendo disponibili tutti i campi senza espandere in memoria un intero file GFS globale.
 
-Installazione consigliata:
+Per una compilazione locale con manifest:
 
 ```powershell
 vcpkg install eccodes:x64-windows
 ```
-
-Il passo successivo e collegare ecCodes al lettore per estrarre `values`, costruire il raster reale, e calcolare l'indice da soglie configurabili CAPE, precipitazione, raffiche e shear. L'indice attuale e intenzionalmente etichettato come indicativo: non simula una misura quando il payload non e ancora stato decompresso.

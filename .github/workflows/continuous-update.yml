@@ -36,6 +36,7 @@ jobs:
           $stage = Join-Path $env:RUNNER_TEMP 'FVG-GribMonitor'
           New-Item -ItemType Directory -Path $stage | Out-Null
           Copy-Item 'x64\Release\FvgGribMonitor.exe' $stage
+          Copy-Item 'x64\Release\FvgBoundary.geojson' $stage
           Copy-Item 'vcpkg_installed\x64-windows\bin\*.dll' $stage
           Copy-Item 'Update-FvgGribMonitor.ps1' $stage
           Copy-Item 'Download-LatestFvgGrib.ps1' $stage
