@@ -7,6 +7,7 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <format>
 #include <string>
@@ -89,6 +90,35 @@ namespace
         return RGB(255, static_cast<int>(245 - 165 * transition), static_cast<int>(60 - 25 * transition));
     }
 
+    double BilinearSample(const GribField& field, double column, double row)
+    {
+        const auto x = std::clamp(column, 0.0, static_cast<double>(field.columns - 1));
+        const auto y = std::clamp(row, 0.0, static_cast<double>(field.rows - 1));
+        const auto x0 = static_cast<std::uint32_t>(x);
+        const auto y0 = static_cast<std::uint32_t>(y);
+        const auto x1 = (std::min)(x0 + 1, field.columns - 1);
+        const auto y1 = (std::min)(y0 + 1, field.rows - 1);
+        const auto horizontal = x - x0;
+        const auto vertical = y - y0;
+        const auto at = [&](std::uint32_t xIndex, std::uint32_t yIndex) { return field.values[yIndex * field.columns + xIndex]; };
+        const auto top = at(x0, y0) * (1.0 - horizontal) + at(x1, y0) * horizontal;
+        const auto bottom = at(x0, y1) * (1.0 - horizontal) + at(x1, y1) * horizontal;
+        return top * (1.0 - vertical) + bottom * vertical;
+    }
+
+    const GribField* FindWindComponent(const GribField& field, int parameterNumber)
+    {
+        const auto result = std::find_if(fields.begin(), fields.end(), [&](const GribField& candidate)
+        {
+            return candidate.discipline == 0 && candidate.parameterCategory == 2
+                && candidate.parameterNumber == parameterNumber
+                && candidate.referenceTime == field.referenceTime && candidate.forecastTime == field.forecastTime
+                && candidate.columns == field.columns && candidate.rows == field.rows
+                && candidate.values.size() == field.values.size();
+        });
+        return result == fields.end() ? nullptr : &*result;
+    }
+
     void DrawTextAt(HDC dc, int x, int y, const wchar_t* text, COLORREF color, int size, bool bold = false)
     {
         HFONT font = CreateFontW(size, 0, 0, 0, bold ? FW_BOLD : FW_NORMAL, FALSE, FALSE, FALSE,
@@ -131,22 +161,24 @@ namespace
             const auto projectX = [&](double longitude) { return mapLeft + static_cast<int>((longitude - minLongitude) / (maxLongitude - minLongitude) * mapWidth); };
             const auto projectY = [&](double latitude) { return mapTop + static_cast<int>((maxLatitude - latitude) / (maxLatitude - minLatitude) * mapHeight); };
 
-            for (std::uint32_t row = 0; row < field->rows; ++row)
+            constexpr std::uint32_t SmoothingScale = 6;
+            const auto latitudeDirection = field->lastLatitude >= field->firstLatitude ? 1.0 : -1.0;
+            const auto longitudeDirection = field->lastLongitude >= field->firstLongitude ? 1.0 : -1.0;
+            for (std::uint32_t row = 0; row < field->rows * SmoothingScale; ++row)
             {
-                for (std::uint32_t column = 0; column < field->columns; ++column)
+                const auto sourceRow = (static_cast<double>(row) + 0.5) / SmoothingScale - 0.5;
+                const auto latitude = field->firstLatitude + latitudeDirection * sourceRow * latitudeStep;
+                for (std::uint32_t column = 0; column < field->columns * SmoothingScale; ++column)
                 {
-                    const auto index = row * field->columns + column;
-                    if (index >= field->values.size())
-                        continue;
-                    const auto latitude = field->firstLatitude + (field->lastLatitude >= field->firstLatitude ? 1 : -1) * row * latitudeStep;
-                    const auto longitude = field->firstLongitude + (field->lastLongitude >= field->firstLongitude ? 1 : -1) * column * longitudeStep;
+                    const auto sourceColumn = (static_cast<double>(column) + 0.5) / SmoothingScale - 0.5;
+                    const auto longitude = field->firstLongitude + longitudeDirection * sourceColumn * longitudeStep;
                     RECT cell{
-                        projectX(longitude - longitudeStep / 2), projectY(latitude + latitudeStep / 2),
-                        projectX(longitude + longitudeStep / 2), projectY(latitude - latitudeStep / 2)
+                        projectX(longitude - longitudeStep / (2 * SmoothingScale)), projectY(latitude + latitudeStep / (2 * SmoothingScale)),
+                        projectX(longitude + longitudeStep / (2 * SmoothingScale)), projectY(latitude - latitudeStep / (2 * SmoothingScale))
                     };
-                    HBRUSH cellBrush = CreateSolidBrush(GridColor(field->values[index], field->minimumValue, field->maximumValue));
+                    const auto value = BilinearSample(*field, sourceColumn, sourceRow);
+                    HBRUSH cellBrush = CreateSolidBrush(GridColor(value, field->minimumValue, field->maximumValue));
                     FillRect(dc, &cell, cellBrush);
-                    FrameRect(dc, &cell, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
                     DeleteObject(cellBrush);
                 }
             }
@@ -167,6 +199,53 @@ namespace
             SelectObject(dc, oldPen);
             SelectObject(dc, oldBrush);
             DeleteObject(borderPen);
+
+            if (field->discipline == 0 && field->parameterCategory == 2 && (field->parameterNumber == 2 || field->parameterNumber == 3))
+            {
+                const auto zonal = field->parameterNumber == 2 ? field : FindWindComponent(*field, 2);
+                const auto meridional = field->parameterNumber == 3 ? field : FindWindComponent(*field, 3);
+                if (zonal && meridional)
+                {
+                    double maximumMagnitude = 0;
+                    for (std::size_t index = 0; index < zonal->values.size(); ++index)
+                        maximumMagnitude = (std::max)(maximumMagnitude, std::hypot(zonal->values[index], meridional->values[index]));
+
+                    HPEN windPen = CreatePen(PS_SOLID, 1, RGB(45, 45, 45));
+                    const auto previousPen = SelectObject(dc, windPen);
+                    const auto arrowStride = (std::max)(1u, (field->columns + 5) / 6);
+                    constexpr double Pi = 3.14159265358979323846;
+                    for (std::uint32_t row = 0; row < field->rows; row += arrowStride)
+                    {
+                        for (std::uint32_t column = 0; column < field->columns; column += arrowStride)
+                        {
+                            const auto index = row * field->columns + column;
+                            const auto zonalValue = zonal->values[index];
+                            const auto meridionalValue = meridional->values[index];
+                            const auto magnitude = std::hypot(zonalValue, meridionalValue);
+                            if (magnitude == 0 || maximumMagnitude == 0)
+                                continue;
+
+                            const auto latitude = field->firstLatitude + latitudeDirection * row * latitudeStep;
+                            const auto longitude = field->firstLongitude + longitudeDirection * column * longitudeStep;
+                            const auto x = projectX(longitude);
+                            const auto y = projectY(latitude);
+                            const auto angle = std::atan2(-meridionalValue, zonalValue);
+                            const auto length = 6.0 + 12.0 * magnitude / maximumMagnitude;
+                            const auto endX = x + static_cast<int>(std::cos(angle) * length);
+                            const auto endY = y + static_cast<int>(std::sin(angle) * length);
+                            MoveToEx(dc, x, y, nullptr);
+                            LineTo(dc, endX, endY);
+                            for (const double offset : { Pi * 0.78, -Pi * 0.78 })
+                            {
+                                MoveToEx(dc, endX, endY, nullptr);
+                                LineTo(dc, endX + static_cast<int>(std::cos(angle + offset) * 5), endY + static_cast<int>(std::sin(angle + offset) * 5));
+                            }
+                        }
+                    }
+                    SelectObject(dc, previousPen);
+                    DeleteObject(windPen);
+                }
+            }
 
             const struct { const wchar_t* name; double longitude; double latitude; } cities[] = {
                 { L"Udine", 13.234, 46.071 }, { L"Trieste", 13.777, 45.650 },

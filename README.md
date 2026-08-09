@@ -8,6 +8,7 @@ Applicazione desktop Win32/C++20 per l'inventario di file GRIB2 e la visualizzaz
 - mostra disciplina, categoria e numero del parametro, template di griglia/prodotto, data di riferimento, lead time e dimensione della griglia;
 - riconosce CAPE, CIN, precipitazione, temperatura e componenti del vento;
 - decodifica il template GRIB2 5.0 (simple packing) e disegna ogni cella della griglia nel suo punto geografico;
+- interpola visivamente i valori tra celle adiacenti e traccia vettori del vento quando sono presenti entrambe le componenti zonale e meridionale;
 - sovrappone il contorno FVG e Udine, Trieste, Pordenone e Gorizia al raster;
 - calcola un indice da 1 a 10 da valori CAPE reali quando il campo selezionato e CAPE.
 - include un canale di aggiornamento GitHub automatico e consensuale.
