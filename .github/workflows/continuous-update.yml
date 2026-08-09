@@ -1,0 +1,40 @@
+name: Build continuous update
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build x64 release
+        shell: pwsh
+        run: |
+          msbuild FVG-GribMonitor.sln /m /p:Configuration=Release /p:Platform=x64
+
+      - name: Package updater asset
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'FVG-GribMonitor'
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item 'x64\Release\FvgGribMonitor.exe' $stage
+          Copy-Item 'Update-FvgGribMonitor.ps1' $stage
+          Compress-Archive -Path $stage -DestinationPath 'FVG-GribMonitor.zip'
+
+      - name: Publish continuous release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release view continuous 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create continuous --prerelease --title 'Continuous update' --notes 'Aggiornamento automatico dal branch main.'
+          }
+          gh release upload continuous FVG-GribMonitor.zip --clobber
