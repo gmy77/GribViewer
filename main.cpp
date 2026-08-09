@@ -16,11 +16,25 @@ namespace
     constexpr int IdOpen = 1001;
     constexpr int IdFields = 1002;
     constexpr int IdMap = 1003;
+    constexpr int IdUpdate = 1004;
+    constexpr int IdAbout = 1005;
 
     HINSTANCE instance{};
+    HWND openButton{};
+    HWND updateButton{};
+    HWND aboutButton{};
     HWND fieldsList{};
     HWND detailsLabel{};
     HWND severityLabel{};
+    HWND titleLabel{};
+    HWND fieldsHeading{};
+    HWND detailsHeading{};
+    HWND mapHeading{};
+    HBRUSH headerBrush{};
+    HBRUSH bodyBrush{};
+    HBRUSH infoBrush{};
+    HFONT titleFont{};
+    HFONT uiFont{};
     std::vector<GribField> fields;
     std::wstring openedPath;
 
@@ -153,6 +167,26 @@ namespace
             LoadFile(parent, path);
     }
 
+    void OpenUpdateChannel()
+    {
+        ShellExecuteW(nullptr, L"open", L"https://github.com/gmy77/GribViewer/releases/tag/continuous", nullptr, nullptr, SW_SHOWNORMAL);
+    }
+
+    void ShowAbout(HWND parent)
+    {
+        MessageBoxW(parent,
+            L"FVG GRIB Monitor\n\n"
+            L"Dashboard operativa per l'inventario e la consultazione di file GRIB2 "
+            L"del Friuli Venezia Giulia.\n\n"
+            L"Made by Gimmy Pignolo and Copilot",
+            L"About FVG GRIB Monitor", MB_OK | MB_ICONINFORMATION);
+    }
+
+    void SetControlFont(HWND control, HFONT font)
+    {
+        SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    }
+
     LRESULT CALLBACK MapProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
     {
         if (message == WM_PAINT)
@@ -168,31 +202,94 @@ namespace
         switch (message)
         {
         case WM_CREATE:
-            CreateWindowW(L"BUTTON", L"Apri GRIB...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 14, 14, 130, 34, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdOpen)), instance, nullptr);
-            CreateWindowW(L"STATIC", L"Campi GRIB2", WS_CHILD | WS_VISIBLE | SS_LEFT, 160, 20, 230, 24, window, nullptr, instance, nullptr);
-            fieldsList = CreateWindowW(L"LISTBOX", nullptr, WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY | WS_VSCROLL, 14, 58, 380, 260, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdFields)), instance, nullptr);
-            detailsLabel = CreateWindowW(L"STATIC", L"Seleziona un file GRIB2.", WS_CHILD | WS_VISIBLE | SS_LEFT, 14, 330, 380, 150, window, nullptr, instance, nullptr);
-            severityLabel = CreateWindowW(L"STATIC", L"Indice: n/d", WS_CHILD | WS_VISIBLE | SS_LEFT, 14, 490, 380, 32, window, nullptr, instance, nullptr);
-            CreateWindowW(L"FvgMap", nullptr, WS_CHILD | WS_VISIBLE | WS_BORDER, 410, 14, 660, 510, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdMap)), instance, nullptr);
+            headerBrush = CreateSolidBrush(RGB(18, 92, 118));
+            bodyBrush = CreateSolidBrush(RGB(241, 245, 247));
+            infoBrush = CreateSolidBrush(RGB(255, 255, 255));
+            titleFont = CreateFontW(-24, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+            uiFont = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+
+            titleLabel = CreateWindowW(L"STATIC", L"FVG GRIB MONITOR", WS_CHILD | WS_VISIBLE, 16, 20, 270, 32, window, nullptr, instance, nullptr);
+            openButton = CreateWindowW(L"BUTTON", L"Apri GRIB", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 17, 120, 36, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdOpen)), instance, nullptr);
+            updateButton = CreateWindowW(L"BUTTON", L"Aggiorna", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 17, 105, 36, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdUpdate)), instance, nullptr);
+            aboutButton = CreateWindowW(L"BUTTON", L"About", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 17, 85, 36, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdAbout)), instance, nullptr);
+            fieldsHeading = CreateWindowW(L"STATIC", L"CAMPI METEOROLOGICI", WS_CHILD | WS_VISIBLE, 16, 86, 300, 22, window, nullptr, instance, nullptr);
+            fieldsList = CreateWindowW(L"LISTBOX", nullptr, WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY | WS_VSCROLL, 16, 112, 380, 236, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdFields)), instance, nullptr);
+            detailsHeading = CreateWindowW(L"STATIC", L"DETTAGLIO DEL CAMPO", WS_CHILD | WS_VISIBLE, 16, 366, 300, 22, window, nullptr, instance, nullptr);
+            detailsLabel = CreateWindowW(L"STATIC", L"Seleziona un file GRIB2.", WS_CHILD | WS_VISIBLE | SS_LEFT, 16, 392, 380, 126, window, nullptr, instance, nullptr);
+            severityLabel = CreateWindowW(L"STATIC", L"Indice: n/d", WS_CHILD | WS_VISIBLE | SS_LEFT, 16, 530, 380, 32, window, nullptr, instance, nullptr);
+            mapHeading = CreateWindowW(L"STATIC", L"MAPPA OPERATIVA FVG", WS_CHILD | WS_VISIBLE, 410, 86, 300, 22, window, nullptr, instance, nullptr);
+            CreateWindowW(L"FvgMap", nullptr, WS_CHILD | WS_VISIBLE | WS_BORDER, 410, 112, 660, 440, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdMap)), instance, nullptr);
+
+            SetControlFont(titleLabel, titleFont);
+            for (const HWND control : { openButton, updateButton, aboutButton, fieldsHeading, fieldsList, detailsHeading, detailsLabel, severityLabel, mapHeading })
+                SetControlFont(control, uiFont);
             return 0;
         case WM_SIZE:
         {
             RECT client{};
             GetClientRect(window, &client);
-            const int panelWidth = (std::max)(360, static_cast<int>(client.right) / 3);
-            MoveWindow(fieldsList, 14, 58, panelWidth - 28, 260, TRUE);
-            MoveWindow(detailsLabel, 14, 330, panelWidth - 28, 150, TRUE);
-            MoveWindow(severityLabel, 14, 490, panelWidth - 28, 32, TRUE);
-            MoveWindow(GetDlgItem(window, IdMap), panelWidth + 2, 14, client.right - panelWidth - 16, client.bottom - 28, TRUE);
+            const int panelWidth = (std::max)(390, static_cast<int>(client.right) / 3);
+            const int right = static_cast<int>(client.right) - 16;
+            MoveWindow(openButton, right - 330, 17, 120, 36, TRUE);
+            MoveWindow(updateButton, right - 200, 17, 105, 36, TRUE);
+            MoveWindow(aboutButton, right - 85, 17, 85, 36, TRUE);
+            MoveWindow(fieldsHeading, 16, 86, panelWidth - 32, 22, TRUE);
+            MoveWindow(fieldsList, 16, 112, panelWidth - 32, 236, TRUE);
+            MoveWindow(detailsHeading, 16, 366, panelWidth - 32, 22, TRUE);
+            MoveWindow(detailsLabel, 16, 392, panelWidth - 32, 126, TRUE);
+            MoveWindow(severityLabel, 16, 530, panelWidth - 32, 32, TRUE);
+            MoveWindow(mapHeading, panelWidth + 16, 86, client.right - panelWidth - 32, 22, TRUE);
+            MoveWindow(GetDlgItem(window, IdMap), panelWidth + 16, 112, client.right - panelWidth - 32, client.bottom - 128, TRUE);
             return 0;
+        }
+        case WM_PAINT:
+        {
+            PAINTSTRUCT paint{};
+            const auto dc = BeginPaint(window, &paint);
+            RECT client{};
+            GetClientRect(window, &client);
+            FillRect(dc, &client, bodyBrush);
+            client.bottom = 70;
+            FillRect(dc, &client, headerBrush);
+            EndPaint(window, &paint);
+            return 0;
+        }
+        case WM_CTLCOLORSTATIC:
+        {
+            const auto dc = reinterpret_cast<HDC>(wParam);
+            const auto control = reinterpret_cast<HWND>(lParam);
+            SetBkMode(dc, TRANSPARENT);
+            if (control == titleLabel)
+            {
+                SetTextColor(dc, RGB(255, 255, 255));
+                return reinterpret_cast<LRESULT>(headerBrush);
+            }
+            if (control == detailsLabel || control == severityLabel)
+            {
+                SetTextColor(dc, RGB(31, 54, 66));
+                return reinterpret_cast<LRESULT>(infoBrush);
+            }
+            SetTextColor(dc, RGB(33, 79, 96));
+            return reinterpret_cast<LRESULT>(bodyBrush);
         }
         case WM_COMMAND:
             if (LOWORD(wParam) == IdOpen)
                 ChooseAndLoadFile(window);
+            else if (LOWORD(wParam) == IdUpdate)
+                OpenUpdateChannel();
+            else if (LOWORD(wParam) == IdAbout)
+                ShowAbout(window);
             else if (LOWORD(wParam) == IdFields && HIWORD(wParam) == LBN_SELCHANGE)
                 UpdateSelection(window);
             return 0;
         case WM_DESTROY:
+            DeleteObject(headerBrush);
+            DeleteObject(bodyBrush);
+            DeleteObject(infoBrush);
+            DeleteObject(titleFont);
+            DeleteObject(uiFont);
             PostQuitMessage(0);
             return 0;
         default:
@@ -206,7 +303,7 @@ int WINAPI wWinMain(HINSTANCE application, HINSTANCE, PWSTR, int commandShow)
     instance = application;
     WNDCLASSW mapClass{ .lpfnWndProc = MapProc, .hInstance = instance, .hCursor = LoadCursor(nullptr, IDC_ARROW), .lpszClassName = L"FvgMap" };
     RegisterClassW(&mapClass);
-    WNDCLASSW mainClass{ .lpfnWndProc = MainProc, .hInstance = instance, .hCursor = LoadCursor(nullptr, IDC_ARROW), .hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1), .lpszClassName = L"FvgGribMonitor" };
+    WNDCLASSW mainClass{ .lpfnWndProc = MainProc, .hInstance = instance, .hCursor = LoadCursor(nullptr, IDC_ARROW), .lpszClassName = L"FvgGribMonitor" };
     RegisterClassW(&mainClass);
 
     const auto window = CreateWindowExW(0, mainClass.lpszClassName, L"FVG GRIB Monitor", WS_OVERLAPPEDWINDOW,
