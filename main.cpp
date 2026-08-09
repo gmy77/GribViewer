@@ -179,7 +179,7 @@ namespace
         {
             RECT client{};
             GetClientRect(window, &client);
-            const int panelWidth = std::max(360, client.right / 3);
+            const int panelWidth = (std::max)(360, static_cast<int>(client.right) / 3);
             MoveWindow(fieldsList, 14, 58, panelWidth - 28, 260, TRUE);
             MoveWindow(detailsLabel, 14, 330, panelWidth - 28, 150, TRUE);
             MoveWindow(severityLabel, 14, 490, panelWidth - 28, 32, TRUE);
