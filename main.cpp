@@ -152,16 +152,16 @@ namespace
                 : std::abs(field->lastLatitude - field->firstLatitude) / (field->rows - 1);
             const auto longitudeStep = field->longitudeIncrement > 0 ? field->longitudeIncrement
                 : std::abs(field->lastLongitude - field->firstLongitude) / (field->columns - 1);
-            const auto minLatitude = (std::min)(field->firstLatitude, field->lastLatitude) - latitudeStep / 2;
-            const auto maxLatitude = (std::max)(field->firstLatitude, field->lastLatitude) + latitudeStep / 2;
-            const auto minLongitude = (std::min)(field->firstLongitude, field->lastLongitude) - longitudeStep / 2;
-            const auto maxLongitude = (std::max)(field->firstLongitude, field->lastLongitude) + longitudeStep / 2;
+            constexpr double MinLatitude = 45.4;
+            constexpr double MaxLatitude = 47.1;
+            constexpr double MinLongitude = 12.0;
+            constexpr double MaxLongitude = 14.1;
             const int mapLeft = 32;
             const int mapTop = 28;
             const int mapWidth = width - 64;
             const int mapHeight = height - 84;
-            const auto projectX = [&](double longitude) { return mapLeft + static_cast<int>((longitude - minLongitude) / (maxLongitude - minLongitude) * mapWidth); };
-            const auto projectY = [&](double latitude) { return mapTop + static_cast<int>((maxLatitude - latitude) / (maxLatitude - minLatitude) * mapHeight); };
+            const auto projectX = [&](double longitude) { return mapLeft + static_cast<int>((longitude - MinLongitude) / (MaxLongitude - MinLongitude) * mapWidth); };
+            const auto projectY = [&](double latitude) { return mapTop + static_cast<int>((MaxLatitude - latitude) / (MaxLatitude - MinLatitude) * mapHeight); };
 
             constexpr std::uint32_t SmoothingScale = 6;
             const auto latitudeDirection = field->lastLatitude >= field->firstLatitude ? 1.0 : -1.0;
@@ -170,10 +170,14 @@ namespace
             {
                 const auto sourceRow = (static_cast<double>(row) + 0.5) / SmoothingScale - 0.5;
                 const auto latitude = field->firstLatitude + latitudeDirection * sourceRow * latitudeStep;
+                if (latitude < MinLatitude - latitudeStep || latitude > MaxLatitude + latitudeStep)
+                    continue;
                 for (std::uint32_t column = 0; column < field->columns * SmoothingScale; ++column)
                 {
                     const auto sourceColumn = (static_cast<double>(column) + 0.5) / SmoothingScale - 0.5;
                     const auto longitude = field->firstLongitude + longitudeDirection * sourceColumn * longitudeStep;
+                    if (longitude < MinLongitude - longitudeStep || longitude > MaxLongitude + longitudeStep)
+                        continue;
                     RECT cell{
                         projectX(longitude - longitudeStep / (2 * SmoothingScale)), projectY(latitude + latitudeStep / (2 * SmoothingScale)),
                         projectX(longitude + longitudeStep / (2 * SmoothingScale)), projectY(latitude - latitudeStep / (2 * SmoothingScale))
