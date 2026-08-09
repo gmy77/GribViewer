@@ -1,5 +1,6 @@
 #include "GribReader.h"
 
+#define NOMINMAX
 #include <windows.h>
 #include <commdlg.h>
 #include <shellapi.h>
@@ -141,9 +142,13 @@ namespace
     void ChooseAndLoadFile(HWND parent)
     {
         wchar_t path[MAX_PATH]{};
-        OPENFILENAMEW dialog{ .lStructSize = sizeof(OPENFILENAMEW), .hwndOwner = parent, .lpstrFile = path,
-            .nMaxFile = MAX_PATH, .lpstrFilter = L"File GRIB (*.grib;*.grib2)\0*.grib;*.grib2\0Tutti i file\0*.*\0",
-            .Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST };
+        OPENFILENAMEW dialog{};
+        dialog.lStructSize = sizeof(dialog);
+        dialog.hwndOwner = parent;
+        dialog.lpstrFile = path;
+        dialog.nMaxFile = MAX_PATH;
+        dialog.lpstrFilter = L"File GRIB (*.grib;*.grib2)\0*.grib;*.grib2\0Tutti i file\0*.*\0";
+        dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
         if (GetOpenFileNameW(&dialog))
             LoadFile(parent, path);
     }
@@ -163,12 +168,12 @@ namespace
         switch (message)
         {
         case WM_CREATE:
-            CreateWindowW(L"BUTTON", L"Apri GRIB...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 14, 14, 130, 34, window, reinterpret_cast<HMENU>(IdOpen), instance, nullptr);
+            CreateWindowW(L"BUTTON", L"Apri GRIB...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 14, 14, 130, 34, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdOpen)), instance, nullptr);
             CreateWindowW(L"STATIC", L"Inventario e opzioni di visualizzazione", WS_CHILD | WS_VISIBLE | SS_LEFT, 160, 20, 230, 24, window, nullptr, instance, nullptr);
-            fieldsList = CreateWindowW(L"LISTBOX", nullptr, WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY | WS_VSCROLL, 14, 58, 380, 260, window, reinterpret_cast<HMENU>(IdFields), instance, nullptr);
+            fieldsList = CreateWindowW(L"LISTBOX", nullptr, WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY | WS_VSCROLL, 14, 58, 380, 260, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdFields)), instance, nullptr);
             detailsLabel = CreateWindowW(L"STATIC", L"Seleziona un file GRIB2.", WS_CHILD | WS_VISIBLE | SS_LEFT, 14, 330, 380, 150, window, nullptr, instance, nullptr);
             severityLabel = CreateWindowW(L"STATIC", L"Indice: n/d", WS_CHILD | WS_VISIBLE | SS_LEFT, 14, 490, 380, 32, window, nullptr, instance, nullptr);
-            CreateWindowW(L"FvgMap", nullptr, WS_CHILD | WS_VISIBLE | WS_BORDER, 410, 14, 660, 510, window, reinterpret_cast<HMENU>(IdMap), instance, nullptr);
+            CreateWindowW(L"FvgMap", nullptr, WS_CHILD | WS_VISIBLE | WS_BORDER, 410, 14, 660, 510, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdMap)), instance, nullptr);
             return 0;
         case WM_SIZE:
         {
