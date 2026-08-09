@@ -17,11 +17,11 @@ if (-not $asset) {
 
 $stateDirectory = Join-Path $env:LOCALAPPDATA 'FVG-GribMonitor'
 $stateFile = Join-Path $stateDirectory 'update-state.json'
-$previousRelease = if (Test-Path $stateFile) {
-    (Get-Content -Raw $stateFile | ConvertFrom-Json).releaseId
+$previousState = if (Test-Path $stateFile) {
+    Get-Content -Raw $stateFile | ConvertFrom-Json
 }
 
-if (-not $Force -and $previousRelease -eq $release.id) {
+if (-not $Force -and $previousState.releaseId -eq $release.id -and $previousState.updatedAt -eq $release.updated_at) {
     Write-Host 'FVG GRIB Monitor e gia aggiornato.'
     exit 0
 }
