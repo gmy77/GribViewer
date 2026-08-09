@@ -23,7 +23,7 @@ jobs:
       - name: Install ecCodes
         shell: pwsh
         run: |
-          & "$env:VCPKG_ROOT\vcpkg.exe" install --triplet x64-windows --x-manifest-root .
+          & "$env:VCPKG_ROOT\vcpkg.exe" install --triplet x64-windows --x-manifest-root . --x-install-root "$PWD\vcpkg_installed"
 
       - name: Build x64 release
         shell: pwsh
@@ -36,7 +36,7 @@ jobs:
           $stage = Join-Path $env:RUNNER_TEMP 'FVG-GribMonitor'
           New-Item -ItemType Directory -Path $stage | Out-Null
           Copy-Item 'x64\Release\FvgGribMonitor.exe' $stage
-          Copy-Item "$env:VCPKG_ROOT\installed\x64-windows\bin\*.dll" $stage
+          Copy-Item 'vcpkg_installed\x64-windows\bin\*.dll' $stage
           Copy-Item 'Update-FvgGribMonitor.ps1' $stage
           Copy-Item 'Download-LatestFvgGrib.ps1' $stage
           Compress-Archive -Path $stage -DestinationPath 'FVG-GribMonitor.zip'
