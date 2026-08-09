@@ -2,13 +2,14 @@
 param()
 
 $ErrorActionPreference = 'Stop'
+$messageAssembly = Add-Type -AssemblyName PresentationFramework -PassThru
 $downloads = [Environment]::GetFolderPath('UserProfile') + '\Downloads'
 $candidate = (Get-Date).ToUniversalTime().AddHours(-5)
 
 for ($attempt = 0; $attempt -lt 5; $attempt++) {
     $cycleHour = [Math]::Floor($candidate.Hour / 6) * 6
     $run = Get-Date -Date $candidate.Date.AddHours($cycleHour) -Format 'yyyyMMdd'
-    $cycle = '{0:D2}' -f $cycleHour
+    $cycle = $cycleHour.ToString('00')
     $file = "gfs.t${cycle}z.pgrb2.0p25.f006"
     $query = @{
         file = $file; lev_surface = 'on'; var_CAPE = 'on'; var_UGRD = 'on'; var_VGRD = 'on'
@@ -23,7 +24,7 @@ for ($attempt = 0; $attempt -lt 5; $attempt++) {
     try {
         Invoke-WebRequest -Uri $url -OutFile $output -UseBasicParsing
         if ((Get-Item $output).Length -gt 1024) {
-            Write-Host "Scaricato: $output"
+            [System.Windows.MessageBox]::Show("GRIB scaricato in:`n$output", 'FVG GRIB Monitor', 'OK', 'Information') | Out-Null
             Start-Process explorer.exe -ArgumentList "/select,`"$output`""
             exit 0
         }
@@ -35,4 +36,5 @@ for ($attempt = 0; $attempt -lt 5; $attempt++) {
     $candidate = $candidate.AddHours(-6)
 }
 
-throw 'Nessun ciclo GFS disponibile da NOAA NOMADS. Riprovare tra qualche minuto.'
+[System.Windows.MessageBox]::Show('Nessun ciclo GFS disponibile da NOAA NOMADS. Riprovare tra qualche minuto.', 'Download GRIB non riuscito', 'OK', 'Warning') | Out-Null
+exit 1

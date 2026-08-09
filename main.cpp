@@ -345,7 +345,7 @@ namespace
             MessageBoxW(parent, L"Lo script di download non e disponibile accanto all'eseguibile.", L"FVG GRIB Monitor", MB_OK | MB_ICONWARNING);
             return;
         }
-        const auto arguments = std::format(L"-ExecutionPolicy Bypass -File \"{}\"", script.wstring());
+        const auto arguments = std::format(L"-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"{}\"", script.wstring());
         ShellExecuteW(parent, L"open", L"powershell.exe", arguments.c_str(), script.parent_path().c_str(), SW_SHOWNORMAL);
     }
 
