@@ -3,6 +3,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <commdlg.h>
+#include <dwmapi.h>
 #include <shellapi.h>
 
 #include <algorithm>
@@ -10,6 +11,8 @@
 #include <format>
 #include <string>
 #include <vector>
+
+#pragma comment(lib, "dwmapi.lib")
 
 namespace
 {
@@ -40,6 +43,17 @@ namespace
 
     int SeverityFor(const GribField& field)
     {
+        if (field.discipline == 0 && field.parameterCategory == 7 && field.parameterNumber == 6 && !field.values.empty())
+        {
+            if (field.maximumValue >= 4'000) return 10;
+            if (field.maximumValue >= 3'000) return 9;
+            if (field.maximumValue >= 2'000) return 8;
+            if (field.maximumValue >= 1'500) return 7;
+            if (field.maximumValue >= 1'000) return 6;
+            if (field.maximumValue >= 500) return 4;
+            if (field.maximumValue >= 250) return 2;
+            return 1;
+        }
         if (field.discipline == 0 && field.parameterCategory == 7 && field.parameterNumber == 6)
             return 7;
         if (field.discipline == 0 && field.parameterCategory == 1 && field.parameterNumber == 8)
@@ -47,6 +61,32 @@ namespace
         if (field.discipline == 0 && field.parameterCategory == 2)
             return 5;
         return 3;
+    }
+
+    const GribField* SelectedField()
+    {
+        if (fields.empty())
+            return nullptr;
+        const auto selected = static_cast<int>(SendMessageW(fieldsList, LB_GETCURSEL, 0, 0));
+        return &fields[std::clamp(selected, 0, static_cast<int>(fields.size() - 1))];
+    }
+
+    COLORREF GridColor(double value, double minimum, double maximum)
+    {
+        const auto range = maximum - minimum;
+        const auto normalized = range > 0 ? std::clamp((value - minimum) / range, 0.0, 1.0) : 0.5;
+        if (normalized < 0.33)
+        {
+            const auto transition = normalized / 0.33;
+            return RGB(static_cast<int>(35 + 20 * transition), static_cast<int>(115 + 110 * transition), 215);
+        }
+        if (normalized < 0.66)
+        {
+            const auto transition = (normalized - 0.33) / 0.33;
+            return RGB(static_cast<int>(55 + 200 * transition), static_cast<int>(225 + 20 * transition), static_cast<int>(215 - 155 * transition));
+        }
+        const auto transition = (normalized - 0.66) / 0.34;
+        return RGB(255, static_cast<int>(245 - 165 * transition), static_cast<int>(60 - 25 * transition));
     }
 
     void DrawTextAt(HDC dc, int x, int y, const wchar_t* text, COLORREF color, int size, bool bold = false)
@@ -73,40 +113,81 @@ namespace
 
         const int width = rect.right - rect.left;
         const int height = rect.bottom - rect.top;
-        const int score = fields.empty() ? 0 : SeverityFor(fields[std::clamp<int>(static_cast<int>(SendMessageW(fieldsList, LB_GETCURSEL, 0, 0)), 0, static_cast<int>(fields.size() - 1))]);
-        const COLORREF fill = score >= 7 ? RGB(247, 124, 99) : score >= 5 ? RGB(247, 201, 94) : RGB(126, 196, 136);
-
-        POINT border[] = {
-            { width * 19 / 100, height * 34 / 100 }, { width * 36 / 100, height * 22 / 100 },
-            { width * 62 / 100, height * 19 / 100 }, { width * 82 / 100, height * 30 / 100 },
-            { width * 88 / 100, height * 53 / 100 }, { width * 76 / 100, height * 75 / 100 },
-            { width * 50 / 100, height * 82 / 100 }, { width * 31 / 100, height * 70 / 100 },
-            { width * 19 / 100, height * 51 / 100 }
-        };
-        HBRUSH brush = CreateSolidBrush(fill);
-        HPEN pen = CreatePen(PS_SOLID, 3, RGB(37, 67, 96));
-        const auto oldBrush = SelectObject(dc, brush);
-        const auto oldPen = SelectObject(dc, pen);
-        Polygon(dc, border, static_cast<int>(std::size(border)));
-        SelectObject(dc, oldBrush);
-        SelectObject(dc, oldPen);
-        DeleteObject(brush);
-        DeleteObject(pen);
-
-        DrawTextAt(dc, width * 38 / 100, height * 29 / 100, L"Udine", RGB(24, 51, 77), 17, true);
-        DrawTextAt(dc, width * 66 / 100, height * 53 / 100, L"Trieste", RGB(24, 51, 77), 17, true);
-        DrawTextAt(dc, width * 29 / 100, height * 50 / 100, L"Pordenone", RGB(24, 51, 77), 17, true);
-        DrawTextAt(dc, width * 54 / 100, height * 65 / 100, L"Gorizia", RGB(24, 51, 77), 17, true);
-        DrawTextAt(dc, width * 20 / 100, 12, L"Friuli Venezia Giulia", RGB(24, 51, 77), 22, true);
-
-        if (score > 0)
+        const auto field = SelectedField();
+        if (field && !field->values.empty() && field->columns > 0 && field->rows > 0)
         {
-            const auto label = std::format(L"Indice eventi intensi: {}/10", score);
-            DrawTextAt(dc, width * 28 / 100, height * 41 / 100, label.c_str(), RGB(82, 30, 23), 25, true);
+            const auto latitudeStep = field->latitudeIncrement > 0 ? field->latitudeIncrement
+                : std::abs(field->lastLatitude - field->firstLatitude) / (field->rows - 1);
+            const auto longitudeStep = field->longitudeIncrement > 0 ? field->longitudeIncrement
+                : std::abs(field->lastLongitude - field->firstLongitude) / (field->columns - 1);
+            const auto minLatitude = (std::min)(field->firstLatitude, field->lastLatitude) - latitudeStep / 2;
+            const auto maxLatitude = (std::max)(field->firstLatitude, field->lastLatitude) + latitudeStep / 2;
+            const auto minLongitude = (std::min)(field->firstLongitude, field->lastLongitude) - longitudeStep / 2;
+            const auto maxLongitude = (std::max)(field->firstLongitude, field->lastLongitude) + longitudeStep / 2;
+            const int mapLeft = 32;
+            const int mapTop = 28;
+            const int mapWidth = width - 64;
+            const int mapHeight = height - 84;
+            const auto projectX = [&](double longitude) { return mapLeft + static_cast<int>((longitude - minLongitude) / (maxLongitude - minLongitude) * mapWidth); };
+            const auto projectY = [&](double latitude) { return mapTop + static_cast<int>((maxLatitude - latitude) / (maxLatitude - minLatitude) * mapHeight); };
+
+            for (std::uint32_t row = 0; row < field->rows; ++row)
+            {
+                for (std::uint32_t column = 0; column < field->columns; ++column)
+                {
+                    const auto index = row * field->columns + column;
+                    if (index >= field->values.size())
+                        continue;
+                    const auto latitude = field->firstLatitude + (field->lastLatitude >= field->firstLatitude ? 1 : -1) * row * latitudeStep;
+                    const auto longitude = field->firstLongitude + (field->lastLongitude >= field->firstLongitude ? 1 : -1) * column * longitudeStep;
+                    RECT cell{
+                        projectX(longitude - longitudeStep / 2), projectY(latitude + latitudeStep / 2),
+                        projectX(longitude + longitudeStep / 2), projectY(latitude - latitudeStep / 2)
+                    };
+                    HBRUSH cellBrush = CreateSolidBrush(GridColor(field->values[index], field->minimumValue, field->maximumValue));
+                    FillRect(dc, &cell, cellBrush);
+                    FrameRect(dc, &cell, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+                    DeleteObject(cellBrush);
+                }
+            }
+
+            const struct { double longitude; double latitude; } outline[] = {
+                { 12.28, 46.27 }, { 12.51, 46.66 }, { 13.02, 46.82 }, { 13.64, 46.80 },
+                { 13.92, 46.61 }, { 13.82, 46.17 }, { 13.78, 45.62 }, { 13.20, 45.58 },
+                { 12.60, 45.74 }, { 12.28, 46.03 }
+            };
+            std::vector<POINT> border;
+            border.reserve(std::size(outline));
+            for (const auto& point : outline)
+                border.push_back({ projectX(point.longitude), projectY(point.latitude) });
+            HPEN borderPen = CreatePen(PS_SOLID, 3, RGB(20, 48, 69));
+            const auto oldPen = SelectObject(dc, borderPen);
+            const auto oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
+            Polygon(dc, border.data(), static_cast<int>(border.size()));
+            SelectObject(dc, oldPen);
+            SelectObject(dc, oldBrush);
+            DeleteObject(borderPen);
+
+            const struct { const wchar_t* name; double longitude; double latitude; } cities[] = {
+                { L"Udine", 13.234, 46.071 }, { L"Trieste", 13.777, 45.650 },
+                { L"Pordenone", 12.660, 45.956 }, { L"Gorizia", 13.620, 45.940 }
+            };
+            for (const auto& city : cities)
+            {
+                const int x = projectX(city.longitude);
+                const int y = projectY(city.latitude);
+                Ellipse(dc, x - 4, y - 4, x + 4, y + 4);
+                DrawTextAt(dc, x + 7, y - 9, city.name, RGB(17, 37, 54), 15, true);
+            }
+
+            const auto score = SeverityFor(*field);
+            const auto legend = std::format(L"{}  |  {:.1f} - {:.1f}  |  Fenomeni intensi: {}/10",
+                field->parameterName, field->minimumValue, field->maximumValue, score);
+            DrawTextAt(dc, 16, height - 42, legend.c_str(), RGB(24, 51, 77), 16, true);
         }
         else
         {
-            DrawTextAt(dc, width * 24 / 100, height * 44 / 100, L"Aprire un file .grib/.grib2", RGB(24, 51, 77), 21, true);
+            DrawTextAt(dc, width * 18 / 100, height * 44 / 100, L"Il campo selezionato non contiene una griglia simple packing visualizzabile.", RGB(24, 51, 77), 17, true);
         }
         EndPaint(window, &paint);
     }
@@ -120,10 +201,11 @@ namespace
         const auto& field = fields[index];
         const int score = SeverityFor(field);
         const auto detail = std::format(
-            L"Parametro: {}\r\nRiferimento: {}   Previsione: {}\r\nMessaggio: {} byte @ {}   Griglia: template {}, {} punti ({} x {})\r\nProdotto: template {}",
-            field.parameterName, field.referenceTime, field.forecastTime, field.length, field.offset,
-            field.gridTemplate, field.pointCount, field.columns, field.rows, field.productTemplate);
-        const auto severity = std::format(L"Indice indicativo: {}/10", score);
+            L"Parametro: {}\r\nRiferimento: {}   Previsione: {}\r\nGriglia: {} x {} | valori: {:.1f} - {:.1f}\r\nCoordinate: ({:.2f}, {:.2f}) - ({:.2f}, {:.2f})",
+            field.parameterName, field.referenceTime, field.forecastTime,
+            field.columns, field.rows, field.minimumValue, field.maximumValue,
+            field.firstLatitude, field.firstLongitude, field.lastLatitude, field.lastLongitude);
+        const auto severity = std::format(L"Fenomeni intensi: {}/10", score);
         SetWindowTextW(detailsLabel, detail.c_str());
         SetWindowTextW(severityLabel, severity.c_str());
         InvalidateRect(GetDlgItem(parent, IdMap), nullptr, TRUE);
@@ -211,9 +293,9 @@ namespace
                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
 
             titleLabel = CreateWindowW(L"STATIC", L"FVG GRIB MONITOR", WS_CHILD | WS_VISIBLE, 16, 20, 270, 32, window, nullptr, instance, nullptr);
-            openButton = CreateWindowW(L"BUTTON", L"Apri GRIB", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 17, 120, 36, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdOpen)), instance, nullptr);
-            updateButton = CreateWindowW(L"BUTTON", L"Aggiorna", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 17, 105, 36, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdUpdate)), instance, nullptr);
-            aboutButton = CreateWindowW(L"BUTTON", L"About", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 17, 85, 36, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdAbout)), instance, nullptr);
+            openButton = CreateWindowW(L"BUTTON", L"\u25A3  Apri GRIB", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 17, 140, 36, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdOpen)), instance, nullptr);
+            updateButton = CreateWindowW(L"BUTTON", L"\u21BB  Aggiorna", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 17, 120, 36, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdUpdate)), instance, nullptr);
+            aboutButton = CreateWindowW(L"BUTTON", L"\u24D8  About", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 17, 100, 36, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdAbout)), instance, nullptr);
             fieldsHeading = CreateWindowW(L"STATIC", L"CAMPI METEOROLOGICI", WS_CHILD | WS_VISIBLE, 16, 86, 300, 22, window, nullptr, instance, nullptr);
             fieldsList = CreateWindowW(L"LISTBOX", nullptr, WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY | WS_VSCROLL, 16, 112, 380, 236, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdFields)), instance, nullptr);
             detailsHeading = CreateWindowW(L"STATIC", L"DETTAGLIO DEL CAMPO", WS_CHILD | WS_VISIBLE, 16, 366, 300, 22, window, nullptr, instance, nullptr);
@@ -232,9 +314,9 @@ namespace
             GetClientRect(window, &client);
             const int panelWidth = (std::max)(390, static_cast<int>(client.right) / 3);
             const int right = static_cast<int>(client.right) - 16;
-            MoveWindow(openButton, right - 330, 17, 120, 36, TRUE);
-            MoveWindow(updateButton, right - 200, 17, 105, 36, TRUE);
-            MoveWindow(aboutButton, right - 85, 17, 85, 36, TRUE);
+            MoveWindow(openButton, right - 380, 17, 140, 36, TRUE);
+            MoveWindow(updateButton, right - 230, 17, 120, 36, TRUE);
+            MoveWindow(aboutButton, right - 100, 17, 100, 36, TRUE);
             MoveWindow(fieldsHeading, 16, 86, panelWidth - 32, 22, TRUE);
             MoveWindow(fieldsList, 16, 112, panelWidth - 32, 236, TRUE);
             MoveWindow(detailsHeading, 16, 366, panelWidth - 32, 22, TRUE);
@@ -308,6 +390,9 @@ int WINAPI wWinMain(HINSTANCE application, HINSTANCE, PWSTR, int commandShow)
 
     const auto window = CreateWindowExW(0, mainClass.lpszClassName, L"FVG GRIB Monitor", WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, 1100, 650, nullptr, nullptr, instance, nullptr);
+    constexpr DWORD DwmwaSystemBackdropType = 38;
+    constexpr int MicaBackdrop = 2;
+    DwmSetWindowAttribute(window, DwmwaSystemBackdropType, &MicaBackdrop, sizeof(MicaBackdrop));
     ShowWindow(window, commandShow);
 
     int argumentCount = 0;

@@ -17,9 +17,19 @@ struct GribField
     std::uint32_t pointCount{};
     std::uint32_t columns{};
     std::uint32_t rows{};
+    int packingTemplate{};
+    double firstLatitude{};
+    double firstLongitude{};
+    double lastLatitude{};
+    double lastLongitude{};
+    double latitudeIncrement{};
+    double longitudeIncrement{};
+    double minimumValue{};
+    double maximumValue{};
     std::wstring referenceTime;
     std::wstring forecastTime;
     std::wstring parameterName;
+    std::vector<double> values;
 };
 
 class GribReader

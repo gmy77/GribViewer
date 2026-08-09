@@ -1,8 +1,12 @@
 #include "GribReader.h"
 
+#include <algorithm>
+#include <bit>
+#include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <iterator>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
@@ -42,6 +46,64 @@ namespace
         std::wstringstream stream;
         stream << value << L' ' << (unit < std::size(units) ? units[unit] : L"unita sconosciute");
         return stream.str();
+    }
+
+    std::int32_t ReadSignedMagnitude32(const std::vector<std::uint8_t>& bytes, std::size_t offset)
+    {
+        if (!HasBytes(bytes, offset, 4))
+            throw std::runtime_error("Coordinate GRIB troncate.");
+        const auto raw = (static_cast<std::uint32_t>(bytes[offset]) << 24)
+            | (static_cast<std::uint32_t>(bytes[offset + 1]) << 16)
+            | (static_cast<std::uint32_t>(bytes[offset + 2]) << 8)
+            | bytes[offset + 3];
+        const auto magnitude = static_cast<std::int32_t>(raw & 0x7fffffff);
+        return (raw & 0x80000000) ? -magnitude : magnitude;
+    }
+
+    std::int16_t ReadSignedMagnitude16(const std::vector<std::uint8_t>& bytes, std::size_t offset)
+    {
+        const auto raw = static_cast<std::uint16_t>((bytes[offset] << 8) | bytes[offset + 1]);
+        const auto magnitude = static_cast<std::int16_t>(raw & 0x7fff);
+        return (raw & 0x8000) ? -magnitude : magnitude;
+    }
+
+    float ReadIeeeFloat(const std::vector<std::uint8_t>& bytes, std::size_t offset)
+    {
+        if (!HasBytes(bytes, offset, 4))
+            throw std::runtime_error("Valore di riferimento GRIB troncato.");
+        const auto raw = (static_cast<std::uint32_t>(bytes[offset]) << 24)
+            | (static_cast<std::uint32_t>(bytes[offset + 1]) << 16)
+            | (static_cast<std::uint32_t>(bytes[offset + 2]) << 8)
+            | bytes[offset + 3];
+        return std::bit_cast<float>(raw);
+    }
+
+    std::vector<double> DecodeSimplePacking(const std::vector<std::uint8_t>& bytes, std::size_t section, std::size_t sectionLength,
+        std::uint32_t numberValues, float referenceValue, std::int16_t binaryScale, std::int16_t decimalScale, std::uint8_t bitsPerValue)
+    {
+        if (bitsPerValue == 0)
+            return std::vector<double>(numberValues, referenceValue * std::pow(10.0, -decimalScale));
+
+        const auto payloadBitCount = (sectionLength - 5) * 8ull;
+        if (static_cast<std::uint64_t>(numberValues) * bitsPerValue > payloadBitCount)
+            throw std::runtime_error("Il payload GRIB simple packing e troncato.");
+
+        std::vector<double> values;
+        values.reserve(numberValues);
+        const auto binaryMultiplier = std::ldexp(1.0, binaryScale);
+        const auto decimalMultiplier = std::pow(10.0, -decimalScale);
+        for (std::uint32_t valueIndex = 0; valueIndex < numberValues; ++valueIndex)
+        {
+            std::uint32_t packed = 0;
+            for (std::uint8_t bit = 0; bit < bitsPerValue; ++bit)
+            {
+                const auto bitIndex = static_cast<std::uint64_t>(valueIndex) * bitsPerValue + bit;
+                const auto byte = bytes[section + 5 + bitIndex / 8];
+                packed = (packed << 1) | ((byte >> (7 - bitIndex % 8)) & 1);
+            }
+            values.push_back((referenceValue + packed * binaryMultiplier) * decimalMultiplier);
+        }
+        return values;
     }
 }
 
@@ -87,6 +149,12 @@ std::vector<GribField> GribReader::ReadInventory(const std::filesystem::path& pa
         field.offset = message;
         field.length = messageLength;
         field.discipline = bytes[message + 6];
+        bool bitmapPresent = false;
+        std::uint32_t packedValueCount = 0;
+        float referenceValue = 0;
+        std::int16_t binaryScale = 0;
+        std::int16_t decimalScale = 0;
+        std::uint8_t bitsPerValue = 0;
         for (std::size_t section = message + 16; section + 5 <= message + messageLength - 4;)
         {
             const auto sectionLength = ReadU32(bytes, section);
@@ -103,10 +171,16 @@ std::vector<GribField> GribReader::ReadInventory(const std::filesystem::path& pa
                 {
                     field.pointCount = ReadU32(bytes, section + 6);
                     field.gridTemplate = static_cast<int>((bytes[section + 12] << 8) | bytes[section + 13]);
-                    if (field.gridTemplate == 0 && sectionLength >= 40)
+                    if (field.gridTemplate == 0 && sectionLength >= 72)
                     {
                         field.columns = ReadU32(bytes, section + 30);
                         field.rows = ReadU32(bytes, section + 34);
+                        field.firstLatitude = ReadSignedMagnitude32(bytes, section + 46) / 1'000'000.0;
+                        field.firstLongitude = ReadSignedMagnitude32(bytes, section + 50) / 1'000'000.0;
+                        field.lastLatitude = ReadSignedMagnitude32(bytes, section + 55) / 1'000'000.0;
+                        field.lastLongitude = ReadSignedMagnitude32(bytes, section + 59) / 1'000'000.0;
+                        field.latitudeIncrement = ReadU32(bytes, section + 63) / 1'000'000.0;
+                        field.longitudeIncrement = ReadU32(bytes, section + 67) / 1'000'000.0;
                     }
                 }
                 break;
@@ -117,6 +191,30 @@ std::vector<GribField> GribReader::ReadInventory(const std::filesystem::path& pa
                     field.parameterCategory = bytes[section + 9];
                     field.parameterNumber = bytes[section + 10];
                     field.forecastTime = FormatForecastTime(bytes, section);
+                }
+                break;
+            case 5:
+                if (sectionLength >= 21)
+                {
+                    packedValueCount = ReadU32(bytes, section + 5);
+                    field.packingTemplate = static_cast<int>((bytes[section + 9] << 8) | bytes[section + 10]);
+                    referenceValue = ReadIeeeFloat(bytes, section + 11);
+                    binaryScale = ReadSignedMagnitude16(bytes, section + 15);
+                    decimalScale = ReadSignedMagnitude16(bytes, section + 17);
+                    bitsPerValue = bytes[section + 19];
+                }
+                break;
+            case 6:
+                bitmapPresent = sectionLength > 5 && bytes[section + 5] != 255;
+                break;
+            case 7:
+                if (field.packingTemplate == 0 && !bitmapPresent)
+                {
+                    field.values = DecodeSimplePacking(bytes, section, sectionLength, packedValueCount,
+                        referenceValue, binaryScale, decimalScale, bitsPerValue);
+                    const auto [minimum, maximum] = std::minmax_element(field.values.begin(), field.values.end());
+                    field.minimumValue = *minimum;
+                    field.maximumValue = *maximum;
                 }
                 break;
             default:
