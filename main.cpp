@@ -5,6 +5,7 @@
 #include <commdlg.h>
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <windowsx.h>
 
 #include <algorithm>
 #include <atomic>
@@ -16,6 +17,7 @@
 #include <format>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -24,12 +26,21 @@
 
 namespace
 {
+    constexpr const wchar_t* AppVersion = L"1.0.0";
     constexpr int IdOpen = 1001;
     constexpr int IdFields = 1002;
     constexpr int IdMap = 1003;
     constexpr int IdUpdate = 1004;
     constexpr int IdAbout = 1005;
     constexpr int IdDownload = 1006;
+    constexpr int IdComparison = 1007;
+    constexpr int IdCompareEnabled = 1008;
+    constexpr int IdSmoothing = 1009;
+    constexpr int IdVectors = 1010;
+    constexpr int IdContours = 1011;
+    constexpr int IdTerrain = 1012;
+    constexpr int IdSeverityGauge = 1013;
+    constexpr int IdInspector = 1014;
     constexpr UINT MessageInventoryReady = WM_APP + 1;
     constexpr UINT MessageFieldReady = WM_APP + 2;
 
@@ -39,10 +50,19 @@ namespace
     HWND aboutButton{};
     HWND downloadButton{};
     HWND fieldsList{};
+    HWND comparisonList{};
+    HWND compareEnabled{};
+    HWND smoothingEnabled{};
+    HWND vectorsEnabled{};
+    HWND contoursEnabled{};
+    HWND terrainEnabled{};
     HWND detailsLabel{};
     HWND severityLabel{};
+    HWND severityGauge{};
+    HWND inspectorLabel{};
     HWND titleLabel{};
     HWND fieldsHeading{};
+    HWND layerHeading{};
     HWND detailsHeading{};
     HWND mapHeading{};
     HBRUSH headerBrush{};
@@ -54,6 +74,8 @@ namespace
     std::wstring openedPath;
     std::thread loader;
     std::atomic_bool loading{};
+    std::vector<std::size_t> decodeQueue;
+    int currentSeverity{};
 
     struct GeoPoint { double longitude; double latitude; };
     std::vector<std::vector<GeoPoint>> fvgRings;
@@ -190,6 +212,40 @@ namespace
         return &fields[std::clamp(selected, 0, static_cast<int>(fields.size() - 1))];
     }
 
+    bool IsChecked(HWND control)
+    {
+        return SendMessageW(control, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    }
+
+    std::optional<std::size_t> ComparisonIndex()
+    {
+        if (!IsChecked(compareEnabled))
+            return std::nullopt;
+        const auto selection = static_cast<int>(SendMessageW(comparisonList, CB_GETCURSEL, 0, 0));
+        if (selection <= 0)
+            return std::nullopt;
+        const auto itemData = SendMessageW(comparisonList, CB_GETITEMDATA, selection, 0);
+        if (itemData == CB_ERR)
+            return std::nullopt;
+        return static_cast<std::size_t>(itemData);
+    }
+
+    const GribField* ComparisonField()
+    {
+        const auto index = ComparisonIndex();
+        return index && *index < fields.size() ? &fields[*index] : nullptr;
+    }
+
+    bool IsComparable(const GribField& first, const GribField& second)
+    {
+        return first.columns == second.columns && first.rows == second.rows
+            && first.values.size() == second.values.size()
+            && std::abs(first.firstLatitude - second.firstLatitude) < 0.0001
+            && std::abs(first.firstLongitude - second.firstLongitude) < 0.0001
+            && std::abs(first.lastLatitude - second.lastLatitude) < 0.0001
+            && std::abs(first.lastLongitude - second.lastLongitude) < 0.0001;
+    }
+
     COLORREF GridColor(double value, double minimum, double maximum)
     {
         const auto range = maximum - minimum;
@@ -206,6 +262,17 @@ namespace
         }
         const auto transition = (normalized - 0.66) / 0.34;
         return RGB(255, static_cast<int>(245 - 165 * transition), static_cast<int>(60 - 25 * transition));
+    }
+
+    COLORREF DifferenceColor(double value, double extent)
+    {
+        const auto normalized = extent > 0 ? std::clamp(value / extent, -1.0, 1.0) : 0.0;
+        if (normalized < 0)
+        {
+            const auto strength = -normalized;
+            return RGB(static_cast<int>(245 * (1.0 - strength)), static_cast<int>(245 * (1.0 - strength)), 255);
+        }
+        return RGB(255, static_cast<int>(245 * (1.0 - normalized)), static_cast<int>(245 * (1.0 - normalized)));
     }
 
     double BilinearSample(const GribField& field, double column, double row)
@@ -231,10 +298,16 @@ namespace
             return candidate.discipline == 0 && candidate.parameterCategory == 2
                 && candidate.parameterNumber == parameterNumber
                 && candidate.referenceTime == field.referenceTime && candidate.forecastTime == field.forecastTime
-                && candidate.columns == field.columns && candidate.rows == field.rows
-                && candidate.values.size() == field.values.size();
+                && candidate.columns == field.columns && candidate.rows == field.rows;
         });
         return result == fields.end() ? nullptr : &*result;
+    }
+
+    std::optional<std::size_t> FieldIndex(const GribField* field)
+    {
+        if (!field)
+            return std::nullopt;
+        return static_cast<std::size_t>(field - fields.data());
     }
 
     void DrawTextAt(HDC dc, int x, int y, const wchar_t* text, COLORREF color, int size, bool bold = false)
@@ -262,6 +335,8 @@ namespace
         const int width = rect.right - rect.left;
         const int height = rect.bottom - rect.top;
         const auto field = SelectedField();
+        const auto comparison = ComparisonField();
+        const bool comparisonActive = comparison && field && !comparison->values.empty() && IsComparable(*field, *comparison);
         if (field && !field->values.empty() && field->columns > 1 && field->rows > 1)
         {
             const int mapLeft = 32;
@@ -294,6 +369,9 @@ namespace
             }
 
             std::vector<DWORD> raster(static_cast<std::size_t>(drawnWidth) * drawnHeight, RGB(235, 246, 250));
+            const auto differenceExtent = comparisonActive ? (std::max)(
+                std::abs(field->minimumValue - comparison->maximumValue),
+                std::abs(field->maximumValue - comparison->minimumValue)) : 0.0;
             for (int y = 0; y < drawnHeight; ++y)
             {
                 const auto latitude = maxLatitude - (static_cast<double>(y) + 0.5) / scale;
@@ -308,8 +386,14 @@ namespace
                     const auto sourceColumn = (longitude - field->firstLongitude) / columnStep;
                     if (sourceColumn < 0 || sourceColumn > field->columns - 1)
                         continue;
-                    const auto value = BilinearSample(*field, sourceColumn, sourceRow);
-                    const auto color = GridColor(value, field->minimumValue, field->maximumValue);
+                    const auto value = IsChecked(smoothingEnabled) ? BilinearSample(*field, sourceColumn, sourceRow)
+                        : field->values[static_cast<std::size_t>(std::clamp(std::lround(sourceRow), 0L, static_cast<long>(field->rows - 1))) * field->columns
+                            + std::clamp(std::lround(sourceColumn), 0L, static_cast<long>(field->columns - 1))];
+                    const auto color = comparisonActive
+                        ? DifferenceColor(value - (IsChecked(smoothingEnabled) ? BilinearSample(*comparison, sourceColumn, sourceRow)
+                            : comparison->values[static_cast<std::size_t>(std::clamp(std::lround(sourceRow), 0L, static_cast<long>(comparison->rows - 1))) * comparison->columns
+                                + std::clamp(std::lround(sourceColumn), 0L, static_cast<long>(comparison->columns - 1))]), differenceExtent)
+                        : GridColor(value, field->minimumValue, field->maximumValue);
                     raster[static_cast<std::size_t>(y) * drawnWidth + x] = static_cast<DWORD>(GetBValue(color))
                         | (static_cast<DWORD>(GetGValue(color)) << 8) | (static_cast<DWORD>(GetRValue(color)) << 16);
                 }
@@ -340,11 +424,69 @@ namespace
             SelectObject(dc, oldBrush);
             DeleteObject(borderPen);
 
-            if (field->discipline == 0 && field->parameterCategory == 2 && (field->parameterNumber == 2 || field->parameterNumber == 3))
+            if (IsChecked(contoursEnabled))
+            {
+                const auto rowAt = [&](double latitude) { return (latitude - field->firstLatitude) / rowStep; };
+                const auto columnAt = [&](double longitude) { return (longitude - field->firstLongitude) / columnStep; };
+                const int firstRow = (std::max)(0, static_cast<int>(std::floor((std::min)(rowAt(minLatitude), rowAt(maxLatitude)))) - 1);
+                const int lastRow = (std::min)(static_cast<int>(field->rows) - 2, static_cast<int>(std::ceil((std::max)(rowAt(minLatitude), rowAt(maxLatitude)))) + 1);
+                const int firstColumn = (std::max)(0, static_cast<int>(std::floor((std::min)(columnAt(minLongitude), columnAt(maxLongitude)))) - 1);
+                const int lastColumn = (std::min)(static_cast<int>(field->columns) - 2, static_cast<int>(std::ceil((std::max)(columnAt(minLongitude), columnAt(maxLongitude)))) + 1);
+                HPEN contourPen = CreatePen(PS_SOLID, 1, RGB(35, 56, 65));
+                const auto priorPen = SelectObject(dc, contourPen);
+                const auto addIntersection = [](std::vector<POINT>& points, double first, double second, double level,
+                    double x1, double y1, double x2, double y2)
+                {
+                    if ((first < level && second < level) || (first > level && second > level) || first == second)
+                        return;
+                    const auto ratio = (level - first) / (second - first);
+                    points.push_back({ static_cast<LONG>(x1 + (x2 - x1) * ratio), static_cast<LONG>(y1 + (y2 - y1) * ratio) });
+                };
+                for (int levelIndex = 1; levelIndex < 8; ++levelIndex)
+                {
+                    const auto level = field->minimumValue + (field->maximumValue - field->minimumValue) * levelIndex / 8.0;
+                    for (int row = firstRow; row <= lastRow; ++row)
+                    {
+                        for (int column = firstColumn; column <= lastColumn; ++column)
+                        {
+                            const auto valueAt = [&](int x, int y) { return field->values[static_cast<std::size_t>(y) * field->columns + x]; };
+                            const auto longitude = [&](int x) { return field->firstLongitude + x * columnStep; };
+                            const auto latitude = [&](int y) { return field->firstLatitude + y * rowStep; };
+                            const auto x1 = projectX(longitude(column));
+                            const auto x2 = projectX(longitude(column + 1));
+                            const auto y1 = projectY(latitude(row));
+                            const auto y2 = projectY(latitude(row + 1));
+                            std::vector<POINT> intersections;
+                            intersections.reserve(4);
+                            addIntersection(intersections, valueAt(column, row), valueAt(column + 1, row), level, x1, y1, x2, y1);
+                            addIntersection(intersections, valueAt(column + 1, row), valueAt(column + 1, row + 1), level, x2, y1, x2, y2);
+                            addIntersection(intersections, valueAt(column + 1, row + 1), valueAt(column, row + 1), level, x2, y2, x1, y2);
+                            addIntersection(intersections, valueAt(column, row + 1), valueAt(column, row), level, x1, y2, x1, y1);
+                            if (intersections.size() == 2)
+                            {
+                                MoveToEx(dc, intersections[0].x, intersections[0].y, nullptr);
+                                LineTo(dc, intersections[1].x, intersections[1].y);
+                            }
+                            else if (intersections.size() == 4)
+                            {
+                                MoveToEx(dc, intersections[0].x, intersections[0].y, nullptr);
+                                LineTo(dc, intersections[1].x, intersections[1].y);
+                                MoveToEx(dc, intersections[2].x, intersections[2].y, nullptr);
+                                LineTo(dc, intersections[3].x, intersections[3].y);
+                            }
+                        }
+                    }
+                }
+                SelectObject(dc, priorPen);
+                DeleteObject(contourPen);
+            }
+
+            if (IsChecked(vectorsEnabled) && field->discipline == 0 && field->parameterCategory == 2 && (field->parameterNumber == 2 || field->parameterNumber == 3))
             {
                 const auto zonal = field->parameterNumber == 2 ? field : FindWindComponent(*field, 2);
                 const auto meridional = field->parameterNumber == 3 ? field : FindWindComponent(*field, 3);
-                if (zonal && meridional)
+                if (zonal && meridional && !zonal->values.empty() && !meridional->values.empty()
+                    && zonal->values.size() == meridional->values.size())
                 {
                     double maximumMagnitude = 0;
                     for (std::size_t index = 0; index < zonal->values.size(); ++index)
@@ -352,7 +494,7 @@ namespace
 
                     HPEN windPen = CreatePen(PS_SOLID, 1, RGB(45, 45, 45));
                     const auto previousPen = SelectObject(dc, windPen);
-                    const auto arrowStride = (std::max)(1u, (field->columns + 5) / 6);
+                    const auto arrowStride = (std::max)(1u, field->columns / 9);
                     constexpr double Pi = 3.14159265358979323846;
                     for (std::uint32_t row = 0; row < field->rows; row += arrowStride)
                     {
@@ -389,6 +531,29 @@ namespace
                 }
             }
 
+            if (IsChecked(terrainEnabled))
+            {
+                const struct { const wchar_t* name; double longitude; double latitude; int elevation; } peaks[] = {
+                    { L"Coglians", 12.914, 46.614, 2780 }, { L"Cima dei Preti", 12.404, 46.341, 2706 },
+                    { L"Jof Fuart", 13.443, 46.404, 2663 }, { L"Canin", 13.448, 46.366, 2587 }
+                };
+                HPEN terrainPen = CreatePen(PS_SOLID, 1, RGB(92, 76, 51));
+                const auto priorPen = SelectObject(dc, terrainPen);
+                for (const auto& peak : peaks)
+                {
+                    const int x = projectX(peak.longitude);
+                    const int y = projectY(peak.latitude);
+                    MoveToEx(dc, x, y - 6, nullptr);
+                    LineTo(dc, x - 5, y + 5);
+                    LineTo(dc, x + 5, y + 5);
+                    LineTo(dc, x, y - 6);
+                    const auto label = std::format(L"{} {} m", peak.name, peak.elevation);
+                    DrawTextAt(dc, x + 6, y + 3, label.c_str(), RGB(77, 63, 42), 12, true);
+                }
+                SelectObject(dc, priorPen);
+                DeleteObject(terrainPen);
+            }
+
             const struct { const wchar_t* name; double longitude; double latitude; } cities[] = {
                 { L"Udine", 13.234, 46.071 }, { L"Trieste", 13.777, 45.650 },
                 { L"Pordenone", 12.660, 45.956 }, { L"Gorizia", 13.620, 45.940 }
@@ -402,8 +567,11 @@ namespace
             }
 
             const auto score = SeverityFor(*field);
-            const auto legend = std::format(L"{}  |  {:.1f} - {:.1f}  |  Fenomeni intensi: {}/10",
-                field->parameterName, field->minimumValue, field->maximumValue, score);
+            const auto legend = comparisonActive
+                ? std::format(L"Confronto: {} - {}  |  scarto \u00B1{:.1f}  |  Fenomeni intensi: {}/10",
+                    field->parameterName, comparison->parameterName, differenceExtent, score)
+                : std::format(L"{}  |  {:.1f} - {:.1f}  |  Fenomeni intensi: {}/10",
+                    field->parameterName, field->minimumValue, field->maximumValue, score);
             DrawTextAt(dc, 16, height - 42, legend.c_str(), RGB(24, 51, 77), 16, true);
         }
         else
@@ -414,6 +582,36 @@ namespace
     }
 
     void StartFieldLoad(HWND parent, std::size_t index);
+
+    void QueueFieldLoad(HWND parent, std::size_t index)
+    {
+        if (index >= fields.size() || !fields[index].values.empty())
+            return;
+        if (loading)
+        {
+            if (std::find(decodeQueue.begin(), decodeQueue.end(), index) == decodeQueue.end())
+                decodeQueue.push_back(index);
+            return;
+        }
+        StartFieldLoad(parent, index);
+    }
+
+    void PopulateComparisonList()
+    {
+        const auto previouslySelected = static_cast<int>(SendMessageW(comparisonList, CB_GETCURSEL, 0, 0));
+        SendMessageW(comparisonList, CB_RESETCONTENT, 0, 0);
+        SendMessageW(comparisonList, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Nessun confronto"));
+        const auto selected = static_cast<int>(SendMessageW(fieldsList, LB_GETCURSEL, 0, 0));
+        for (std::size_t index = 0; index < fields.size(); ++index)
+        {
+            if (static_cast<int>(index) == selected)
+                continue;
+            const auto label = std::format(L"{} ({})", fields[index].parameterName, fields[index].forecastTime);
+            const auto item = SendMessageW(comparisonList, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+            SendMessageW(comparisonList, CB_SETITEMDATA, item, index);
+        }
+        SendMessageW(comparisonList, CB_SETCURSEL, previouslySelected > 0 ? previouslySelected : 0, 0);
+    }
 
     void UpdateSelection(HWND parent)
     {
@@ -430,10 +628,19 @@ namespace
             field.columns, field.rows, valueRange,
             field.firstLatitude, field.firstLongitude, field.lastLatitude, field.lastLongitude);
         const auto severity = field.values.empty() ? L"Decodifica del campo in background..." : std::format(L"Fenomeni intensi: {}/10", score);
+        currentSeverity = field.values.empty() ? 0 : score;
         SetWindowTextW(detailsLabel, detail.c_str());
         SetWindowTextW(severityLabel, severity.c_str());
+        InvalidateRect(severityGauge, nullptr, TRUE);
         InvalidateRect(GetDlgItem(parent, IdMap), nullptr, TRUE);
-        StartFieldLoad(parent, static_cast<std::size_t>(index));
+        QueueFieldLoad(parent, static_cast<std::size_t>(index));
+        if (IsChecked(vectorsEnabled) && field.discipline == 0 && field.parameterCategory == 2)
+        {
+            if (const auto companion = FieldIndex(FindWindComponent(field, field.parameterNumber == 2 ? 3 : 2)))
+                QueueFieldLoad(parent, *companion);
+        }
+        if (const auto comparison = ComparisonIndex())
+            QueueFieldLoad(parent, *comparison);
     }
 
     void StartFieldLoad(HWND parent, std::size_t index)
@@ -517,10 +724,11 @@ namespace
     void ShowAbout(HWND parent)
     {
         MessageBoxW(parent,
-            L"FVG GRIB Monitor\n\n"
-            L"Dashboard operativa per l'inventario e la consultazione di file GRIB2 "
-            L"del Friuli Venezia Giulia.\n\n"
-            L"Made by Gimmy Pignolo and Copilot",
+            std::format(
+                L"FVG GRIB Monitor v{}\n\n"
+                L"Dashboard operativa per l'inventario e la consultazione di file GRIB2 "
+                L"del Friuli Venezia Giulia.\n\n"
+                L"Made by Gimmy Pignolo and Claude", AppVersion).c_str(),
             L"About FVG GRIB Monitor", MB_OK | MB_ICONINFORMATION);
     }
 
@@ -529,11 +737,80 @@ namespace
         SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     }
 
+    void InspectMapPoint(HWND map, int mouseX, int mouseY)
+    {
+        const auto field = SelectedField();
+        if (!field || field->values.empty() || field->columns < 2 || field->rows < 2)
+            return;
+        RECT rect{};
+        GetClientRect(map, &rect);
+        constexpr double minLatitude = 45.55;
+        constexpr double maxLatitude = 46.68;
+        constexpr double minLongitude = 12.28;
+        constexpr double maxLongitude = 13.95;
+        constexpr double latitudeCentre = (minLatitude + maxLatitude) / 2;
+        const auto longitudeScale = std::cos(latitudeCentre * 3.14159265358979323846 / 180.0);
+        const auto scale = (std::min)((rect.right - 64) / ((maxLongitude - minLongitude) * longitudeScale),
+            (rect.bottom - 84) / (maxLatitude - minLatitude));
+        const auto drawnWidth = static_cast<int>((maxLongitude - minLongitude) * longitudeScale * scale);
+        const auto drawnHeight = static_cast<int>((maxLatitude - minLatitude) * scale);
+        const auto drawLeft = 32 + ((rect.right - 64) - drawnWidth) / 2;
+        const auto drawTop = 28 + ((rect.bottom - 84) - drawnHeight) / 2;
+        const auto longitude = minLongitude + (mouseX - drawLeft) / (longitudeScale * scale);
+        const auto latitude = maxLatitude - (mouseY - drawTop) / scale;
+        const auto rowStep = (field->lastLatitude - field->firstLatitude) / (field->rows - 1);
+        const auto columnStep = (field->lastLongitude - field->firstLongitude) / (field->columns - 1);
+        const auto row = (latitude - field->firstLatitude) / rowStep;
+        const auto column = (longitude - field->firstLongitude) / columnStep;
+        if (!IsInFvg(longitude, latitude) || row < 0 || row > field->rows - 1 || column < 0 || column > field->columns - 1)
+        {
+            SetWindowTextW(inspectorLabel, L"Ispezione: seleziona un punto dentro il confine FVG.");
+            return;
+        }
+        const auto value = IsChecked(smoothingEnabled) ? BilinearSample(*field, column, row)
+            : field->values[static_cast<std::size_t>(std::clamp(std::lround(row), 0L, static_cast<long>(field->rows - 1))) * field->columns
+                + std::clamp(std::lround(column), 0L, static_cast<long>(field->columns - 1))];
+        const auto comparison = ComparisonField();
+        const auto text = comparison && !comparison->values.empty() && IsComparable(*field, *comparison)
+            ? std::format(L"Ispezione: {:.3f} N, {:.3f} E | {}: {:.2f} | scarto: {:+.2f}",
+                latitude, longitude, field->parameterName, value, value - BilinearSample(*comparison, column, row))
+            : std::format(L"Ispezione: {:.3f} N, {:.3f} E | {}: {:.2f}", latitude, longitude, field->parameterName, value);
+        SetWindowTextW(inspectorLabel, text.c_str());
+    }
+
+    LRESULT CALLBACK SeverityProc(HWND window, UINT message, WPARAM, LPARAM)
+    {
+        if (message != WM_PAINT)
+            return DefWindowProcW(window, message, 0, 0);
+        PAINTSTRUCT paint{};
+        const auto dc = BeginPaint(window, &paint);
+        RECT rect{};
+        GetClientRect(window, &rect);
+        const int gap = 3;
+        const int cellWidth = ((rect.right - rect.left) - 9 * gap) / 10;
+        for (int index = 0; index < 10; ++index)
+        {
+            const auto active = index < currentSeverity;
+            const auto color = index < 3 ? RGB(69, 157, 94) : index < 6 ? RGB(238, 177, 50) : RGB(209, 75, 61);
+            HBRUSH brush = CreateSolidBrush(active ? color : RGB(218, 226, 230));
+            RECT cell{ index * (cellWidth + gap), 4, index * (cellWidth + gap) + cellWidth, (std::max)(5L, rect.bottom - 4) };
+            FillRect(dc, &cell, brush);
+            DeleteObject(brush);
+        }
+        EndPaint(window, &paint);
+        return 0;
+    }
+
     LRESULT CALLBACK MapProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
     {
         if (message == WM_PAINT)
         {
             PaintMap(window);
+            return 0;
+        }
+        if (message == WM_LBUTTONDOWN)
+        {
+            InspectMapPoint(window, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             return 0;
         }
         return DefWindowProcW(window, message, wParam, lParam);
@@ -558,15 +835,29 @@ namespace
             updateButton = CreateWindowW(L"BUTTON", L"\u21BB  Aggiorna", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 17, 120, 36, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdUpdate)), instance, nullptr);
             aboutButton = CreateWindowW(L"BUTTON", L"\u24D8  About", WS_CHILD | WS_VISIBLE | BS_FLAT, 0, 17, 100, 36, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdAbout)), instance, nullptr);
             fieldsHeading = CreateWindowW(L"STATIC", L"CAMPI METEOROLOGICI", WS_CHILD | WS_VISIBLE, 16, 86, 300, 22, window, nullptr, instance, nullptr);
-            fieldsList = CreateWindowW(L"LISTBOX", nullptr, WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY | WS_VSCROLL, 16, 112, 380, 236, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdFields)), instance, nullptr);
-            detailsHeading = CreateWindowW(L"STATIC", L"DETTAGLIO DEL CAMPO", WS_CHILD | WS_VISIBLE, 16, 366, 300, 22, window, nullptr, instance, nullptr);
-            detailsLabel = CreateWindowW(L"STATIC", L"Seleziona un file GRIB2.", WS_CHILD | WS_VISIBLE | SS_LEFT, 16, 392, 380, 126, window, nullptr, instance, nullptr);
-            severityLabel = CreateWindowW(L"STATIC", L"Indice: n/d", WS_CHILD | WS_VISIBLE | SS_LEFT, 16, 530, 380, 32, window, nullptr, instance, nullptr);
+            fieldsList = CreateWindowW(L"LISTBOX", nullptr, WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY | WS_VSCROLL, 16, 112, 380, 144, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdFields)), instance, nullptr);
+            layerHeading = CreateWindowW(L"STATIC", L"LIVELLI E ANALISI", WS_CHILD | WS_VISIBLE, 16, 270, 300, 22, window, nullptr, instance, nullptr);
+            comparisonList = CreateWindowW(L"COMBOBOX", nullptr, WS_CHILD | WS_VISIBLE | WS_BORDER | CBS_DROPDOWNLIST | WS_VSCROLL, 16, 296, 380, 240, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdComparison)), instance, nullptr);
+            compareEnabled = CreateWindowW(L"BUTTON", L"Confronta / differenza", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 328, 185, 24, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdCompareEnabled)), instance, nullptr);
+            smoothingEnabled = CreateWindowW(L"BUTTON", L"Smussatura bilineare", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 205, 328, 190, 24, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdSmoothing)), instance, nullptr);
+            vectorsEnabled = CreateWindowW(L"BUTTON", L"Vettori del vento", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 354, 185, 24, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdVectors)), instance, nullptr);
+            contoursEnabled = CreateWindowW(L"BUTTON", L"Curve di livello", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 205, 354, 190, 24, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdContours)), instance, nullptr);
+            terrainEnabled = CreateWindowW(L"BUTTON", L"Riferimenti orografici", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 16, 380, 210, 24, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdTerrain)), instance, nullptr);
+            severityLabel = CreateWindowW(L"STATIC", L"FENOMENI INTENSI: n/d", WS_CHILD | WS_VISIBLE | SS_LEFT, 16, 414, 380, 24, window, nullptr, instance, nullptr);
+            severityGauge = CreateWindowW(L"FvgSeverityGauge", nullptr, WS_CHILD | WS_VISIBLE, 16, 440, 380, 26, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdSeverityGauge)), instance, nullptr);
+            detailsHeading = CreateWindowW(L"STATIC", L"DETTAGLIO DEL CAMPO", WS_CHILD | WS_VISIBLE, 16, 480, 300, 22, window, nullptr, instance, nullptr);
+            detailsLabel = CreateWindowW(L"STATIC", L"Seleziona un file GRIB2.", WS_CHILD | WS_VISIBLE | SS_LEFT, 16, 506, 380, 84, window, nullptr, instance, nullptr);
+            inspectorLabel = CreateWindowW(L"STATIC", L"Ispezione: fai clic sulla mappa.", WS_CHILD | WS_VISIBLE | SS_LEFT, 16, 596, 380, 54, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdInspector)), instance, nullptr);
             mapHeading = CreateWindowW(L"STATIC", L"MAPPA OPERATIVA FVG", WS_CHILD | WS_VISIBLE, 410, 86, 300, 22, window, nullptr, instance, nullptr);
             CreateWindowW(L"FvgMap", nullptr, WS_CHILD | WS_VISIBLE | WS_BORDER, 410, 112, 660, 440, window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdMap)), instance, nullptr);
 
             SetControlFont(titleLabel, titleFont);
-            for (const HWND control : { openButton, downloadButton, updateButton, aboutButton, fieldsHeading, fieldsList, detailsHeading, detailsLabel, severityLabel, mapHeading })
+            SendMessageW(smoothingEnabled, BM_SETCHECK, BST_CHECKED, 0);
+            SendMessageW(vectorsEnabled, BM_SETCHECK, BST_CHECKED, 0);
+            SendMessageW(terrainEnabled, BM_SETCHECK, BST_CHECKED, 0);
+            SendMessageW(comparisonList, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Nessun confronto"));
+            SendMessageW(comparisonList, CB_SETCURSEL, 0, 0);
+            for (const HWND control : { openButton, downloadButton, updateButton, aboutButton, fieldsHeading, fieldsList, layerHeading, comparisonList, compareEnabled, smoothingEnabled, vectorsEnabled, contoursEnabled, terrainEnabled, detailsHeading, detailsLabel, severityLabel, inspectorLabel, mapHeading })
                 SetControlFont(control, uiFont);
             return 0;
         case WM_SIZE:
@@ -580,10 +871,19 @@ namespace
             MoveWindow(updateButton, right - 230, 17, 120, 36, TRUE);
             MoveWindow(aboutButton, right - 100, 17, 100, 36, TRUE);
             MoveWindow(fieldsHeading, 16, 86, panelWidth - 32, 22, TRUE);
-            MoveWindow(fieldsList, 16, 112, panelWidth - 32, 236, TRUE);
-            MoveWindow(detailsHeading, 16, 366, panelWidth - 32, 22, TRUE);
-            MoveWindow(detailsLabel, 16, 392, panelWidth - 32, 126, TRUE);
-            MoveWindow(severityLabel, 16, 530, panelWidth - 32, 32, TRUE);
+            MoveWindow(fieldsList, 16, 112, panelWidth - 32, 144, TRUE);
+            MoveWindow(layerHeading, 16, 270, panelWidth - 32, 22, TRUE);
+            MoveWindow(comparisonList, 16, 296, panelWidth - 32, 240, TRUE);
+            MoveWindow(compareEnabled, 16, 328, (panelWidth - 32) / 2, 24, TRUE);
+            MoveWindow(smoothingEnabled, 16 + (panelWidth - 32) / 2, 328, (panelWidth - 32) / 2, 24, TRUE);
+            MoveWindow(vectorsEnabled, 16, 354, (panelWidth - 32) / 2, 24, TRUE);
+            MoveWindow(contoursEnabled, 16 + (panelWidth - 32) / 2, 354, (panelWidth - 32) / 2, 24, TRUE);
+            MoveWindow(terrainEnabled, 16, 380, panelWidth - 32, 24, TRUE);
+            MoveWindow(severityLabel, 16, 414, panelWidth - 32, 24, TRUE);
+            MoveWindow(severityGauge, 16, 440, panelWidth - 32, 26, TRUE);
+            MoveWindow(detailsHeading, 16, 480, panelWidth - 32, 22, TRUE);
+            MoveWindow(detailsLabel, 16, 506, panelWidth - 32, 84, TRUE);
+            MoveWindow(inspectorLabel, 16, 596, panelWidth - 32, 54, TRUE);
             MoveWindow(mapHeading, panelWidth + 16, 86, client.right - panelWidth - 32, 22, TRUE);
             MoveWindow(GetDlgItem(window, IdMap), panelWidth + 16, 112, client.right - panelWidth - 32, client.bottom - 128, TRUE);
             return 0;
@@ -628,6 +928,13 @@ namespace
             else if (LOWORD(wParam) == IdAbout)
                 ShowAbout(window);
             else if (LOWORD(wParam) == IdFields && HIWORD(wParam) == LBN_SELCHANGE)
+            {
+                PopulateComparisonList();
+                UpdateSelection(window);
+            }
+            else if ((LOWORD(wParam) == IdComparison && HIWORD(wParam) == CBN_SELCHANGE)
+                || LOWORD(wParam) == IdCompareEnabled || LOWORD(wParam) == IdSmoothing
+                || LOWORD(wParam) == IdVectors || LOWORD(wParam) == IdContours || LOWORD(wParam) == IdTerrain)
                 UpdateSelection(window);
             return 0;
         case MessageInventoryReady:
@@ -652,8 +959,9 @@ namespace
                 SendMessageW(fieldsList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name.c_str()));
             }
             SendMessageW(fieldsList, LB_SETCURSEL, 0, 0);
+            PopulateComparisonList();
             UpdateSelection(window);
-            SetWindowTextW(window, std::format(L"FVG GRIB Monitor - {}", result->path.filename().wstring()).c_str());
+            SetWindowTextW(window, std::format(L"FVG GRIB Monitor v{} - {}", AppVersion, result->path.filename().wstring()).c_str());
             return 0;
         }
         case MessageFieldReady:
@@ -670,6 +978,12 @@ namespace
             if (result->index < fields.size())
                 fields[result->index] = std::move(result->field);
             UpdateSelection(window);
+            if (!loading && !decodeQueue.empty())
+            {
+                const auto next = decodeQueue.front();
+                decodeQueue.erase(decodeQueue.begin());
+                QueueFieldLoad(window, next);
+            }
             return 0;
         }
         case WM_DESTROY:
@@ -702,11 +1016,13 @@ int WINAPI wWinMain(HINSTANCE application, HINSTANCE, PWSTR, int commandShow)
     }
     WNDCLASSW mapClass{ .lpfnWndProc = MapProc, .hInstance = instance, .hCursor = LoadCursor(nullptr, IDC_ARROW), .lpszClassName = L"FvgMap" };
     RegisterClassW(&mapClass);
+    WNDCLASSW gaugeClass{ .lpfnWndProc = SeverityProc, .hInstance = instance, .hCursor = LoadCursor(nullptr, IDC_ARROW), .lpszClassName = L"FvgSeverityGauge" };
+    RegisterClassW(&gaugeClass);
     WNDCLASSW mainClass{ .lpfnWndProc = MainProc, .hInstance = instance, .hCursor = LoadCursor(nullptr, IDC_ARROW), .lpszClassName = L"FvgGribMonitor" };
     RegisterClassW(&mainClass);
 
-    const auto window = CreateWindowExW(0, mainClass.lpszClassName, L"FVG GRIB Monitor", WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 1100, 650, nullptr, nullptr, instance, nullptr);
+    const auto window = CreateWindowExW(0, mainClass.lpszClassName, std::format(L"FVG GRIB Monitor v{}", AppVersion).c_str(), WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, 1100, 720, nullptr, nullptr, instance, nullptr);
     constexpr DWORD DwmwaSystemBackdropType = 38;
     constexpr int MicaBackdrop = 2;
     DwmSetWindowAttribute(window, DwmwaSystemBackdropType, &MicaBackdrop, sizeof(MicaBackdrop));
